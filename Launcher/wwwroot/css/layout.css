@@ -1,4 +1,6 @@
 .app {
     display: flex;
     height: calc(100vh - var(--titlebar-height));
+    min-height: 0;
+    overflow: hidden;
 }
