@@ -1,3 +1,4 @@
+#if WINDOWS
 #nullable enable
 using System;
 using System.Diagnostics;
@@ -40,8 +41,7 @@ internal sealed class NativeFallbackHost : IDisposable
 	public void Start()
 	{
 		Log("Starting native WinForms host (GDI rendering, no Chromium).");
-		Application.EnableVisualStyles();
-		Application.SetCompatibleTextRenderingDefault(false);
+		WinFormsBootstrap.Initialize();
 
 		var form = new CypressForm(this);
 		lock (m_formLock)
@@ -358,3 +358,5 @@ internal sealed class NativeFallbackHost : IDisposable
 		}
 	}
 }
+
+#endif

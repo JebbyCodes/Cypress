@@ -6,6 +6,8 @@ using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Linq;
+using System.Globalization;
+using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 #if WINDOWS
@@ -32,8 +34,9 @@ public partial class MessageHandler
 	// gotta be kept in memory for entitlements/relink
 	private string? m_eaAccessToken;
 
-	// pkce state for in-flight login
-	private string? m_codeVerifier;
+	// Only one EA OAuth flow may run at a time. This keeps the PKCE verifier
+	// paired with the authorization code if a user double-clicks or starts relinking.
+	private int m_eaAuthFlowInProgress;
 
 	private void OnCheckAuth()
 	{
@@ -76,61 +79,87 @@ public partial class MessageHandler
 
 	private void OnEaLogin()
 	{
-		CleanupLegacyQrcHandler();
-
-		var verifierBytes = new byte[32];
-		RandomNumberGenerator.Fill(verifierBytes);
-		m_codeVerifier = Base64UrlEncode(verifierBytes);
-
-		byte[] challengeHash = SHA256.HashData(Encoding.ASCII.GetBytes(m_codeVerifier));
-		string codeChallenge = Base64UrlEncode(challengeHash);
-
-		string pcSign = GeneratePcSign();
-		string authUrl = $"{EA_AUTH_URL}?client_id={EA_CLIENT_ID}"
-			+ $"&response_type=code"
-			+ $"&redirect_uri={Uri.EscapeDataString(EA_REDIRECT_URI)}"
-			+ $"&code_challenge={codeChallenge}"
-			+ $"&code_challenge_method=S256"
-			+ $"&pc_sign={Uri.EscapeDataString(pcSign)}";
-
-		if (TryStartEmbeddedEaLogin(authUrl))
+		if (Interlocked.CompareExchange(ref m_eaAuthFlowInProgress, 1, 0) != 0)
+		{
+			Send(new JObject { ["type"] = "authLoginResult", ["ok"] = false, ["error"] = "An EA sign-in window is already open." });
 			return;
+		}
 
-		Send(new JObject { ["type"] = "authLoginResult", ["ok"] = false, ["error"] = "embedded ea login is unavailable on this platform" });
+		try
+		{
+			string authUrl = BuildEaAuthUrl(out string codeVerifier);
+			if (TryStartEmbeddedEaLogin(authUrl, codeVerifier))
+				return;
+
+			Interlocked.Exchange(ref m_eaAuthFlowInProgress, 0);
+			Send(new JObject
+			{
+				["type"] = "authLoginResult",
+				["ok"] = false,
+				["error"] = "EA sign-in windows are not available in this build. Use the Windows desktop build of Cypress."
+			});
+		}
+		catch (Exception ex)
+		{
+			Interlocked.Exchange(ref m_eaAuthFlowInProgress, 0);
+			Send(new JObject { ["type"] = "authLoginResult", ["ok"] = false, ["error"] = "Could not prepare EA sign-in: " + ex.Message });
+		}
 	}
 
-	private void CleanupLegacyQrcHandler()
+	/// <summary>
+	/// Builds the Juno/EA authorization-code + PKCE request used by Cypress.
+	/// The qrc redirect is intentionally retained because EA's JUNO_PC_CLIENT
+	/// flow returns the authorization code on that URL. Cypress intercepts the
+	/// callback inside its dedicated WebView2 sign-in window.
+	/// </summary>
+	private static string BuildEaAuthUrl(out string codeVerifier)
+	{
+		byte[] verifierBytes = RandomNumberGenerator.GetBytes(32);
+		codeVerifier = Base64UrlEncode(verifierBytes);
+		byte[] challengeHash = SHA256.HashData(Encoding.ASCII.GetBytes(codeVerifier));
+		string codeChallenge = Base64UrlEncode(challengeHash);
+		string pcSign = GeneratePcSign();
+		string nonce = RandomNumberGenerator.GetInt32(int.MinValue, int.MaxValue).ToString(CultureInfo.InvariantCulture);
+
+		var parameters = new Dictionary<string, string>
+		{
+			["client_id"] = EA_CLIENT_ID,
+			["sbiod_enabled"] = "false",
+			["response_type"] = "code",
+			["redirect_uri"] = EA_REDIRECT_URI,
+			["locale"] = "en_US",
+			["pc_sign"] = pcSign,
+			["nonce"] = nonce,
+			["code_challenge_method"] = "S256",
+			["code_challenge"] = codeChallenge
+		};
+
+		string query = string.Join("&", parameters.Select(pair =>
+			Uri.EscapeDataString(pair.Key) + "=" + Uri.EscapeDataString(pair.Value)));
+		return EA_AUTH_URL + "?" + query;
+	}
+
+	private bool TryStartEmbeddedEaLogin(string authUrl, string codeVerifier)
 	{
 #if WINDOWS
 		try
 		{
-			Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\qrc", throwOnMissingSubKey: false);
-		}
-		catch { }
-
-		try
-		{
-			string handlerScript = Path.Combine(GetAppdataDir(), "qrc_handler.cmd");
-			if (File.Exists(handlerScript))
-				File.Delete(handlerScript);
-		}
-		catch { }
-#endif
-	}
-
-	private bool TryStartEmbeddedEaLogin(string authUrl)
-	{
-#if WINDOWS
-		try
-		{
-			Task.Run(async () =>
+			_ = Task.Run(async () =>
 			{
 				try
 				{
-					var result = await EaLoginWindow.ShowAsync(authUrl, EA_REDIRECT_URI);
+					// Use a Cypress-owned WebView2 window on all Windows targets,
+					// including the GameNative/Wine fallback. The WebView2 navigation
+					// events capture EA's qrc callback before it is handed to the OS,
+					// so credentials stay on EA's page and no Android browser hand-off
+					// or manual callback copying is needed.
+					Send(new JObject { ["type"] = "authLoginProgress", ["stage"] = "opening" });
+					EaLoginWindowResult result = await EaLoginWindow.ShowAsync(authUrl, EA_REDIRECT_URI, stage =>
+						Send(new JObject { ["type"] = "authLoginProgress", ["stage"] = stage }));
+
 					if (result.Cancelled)
 					{
-						Send(new JObject { ["type"] = "authLoginResult", ["ok"] = false, ["error"] = "Login cancelled" });
+						Send(new JObject { ["type"] = "authLoginResult", ["ok"] = false, ["error"] = "EA sign-in was cancelled." });
 						return;
 					}
 
@@ -142,15 +171,23 @@ public partial class MessageHandler
 
 					if (string.IsNullOrEmpty(result.Code))
 					{
-						Send(new JObject { ["type"] = "authLoginResult", ["ok"] = false, ["error"] = "No authorization code received" });
+						Send(new JObject { ["type"] = "authLoginResult", ["ok"] = false, ["error"] = "EA did not return an authorization code. Close the sign-in window and try again." });
 						return;
 					}
 
-					await ExchangeCodeForToken(result.Code, EA_REDIRECT_URI);
+					await ExchangeCodeForToken(result.Code, EA_REDIRECT_URI, codeVerifier);
+				}
+				catch (TimeoutException)
+				{
+					Send(new JObject { ["type"] = "authLoginResult", ["ok"] = false, ["error"] = "EA sign-in timed out. Close the EA window and try again." });
 				}
 				catch (Exception ex)
 				{
-					Send(new JObject { ["type"] = "authLoginResult", ["ok"] = false, ["error"] = ex.Message });
+					Send(new JObject { ["type"] = "authLoginResult", ["ok"] = false, ["error"] = "EA sign-in failed: " + ex.Message });
+				}
+				finally
+				{
+					Interlocked.Exchange(ref m_eaAuthFlowInProgress, 0);
 				}
 			});
 			return true;
@@ -164,7 +201,7 @@ public partial class MessageHandler
 #endif
 	}
 
-	private async Task ExchangeCodeForToken(string code, string redirectUri)
+	private async Task ExchangeCodeForToken(string code, string redirectUri, string codeVerifier)
 	{
 		try
 		{
@@ -175,7 +212,7 @@ public partial class MessageHandler
 				new KeyValuePair<string, string>("code", code),
 				new KeyValuePair<string, string>("client_id", EA_CLIENT_ID),
 				new KeyValuePair<string, string>("client_secret", EA_CLIENT_SECRET),
-				new KeyValuePair<string, string>("code_verifier", m_codeVerifier!),
+				new KeyValuePair<string, string>("code_verifier", codeVerifier),
 				new KeyValuePair<string, string>("redirect_uri", redirectUri),
 				new KeyValuePair<string, string>("token_format", "JWS"),
 			});
@@ -421,51 +458,67 @@ public partial class MessageHandler
 			Send(new JObject { ["type"] = "relinkEAResult", ["ok"] = false, ["error"] = "Not logged in" });
 			return;
 		}
-
-		CleanupLegacyQrcHandler();
-
-		var verifierBytes = new byte[32];
-		RandomNumberGenerator.Fill(verifierBytes);
-		m_codeVerifier = Base64UrlEncode(verifierBytes);
-		byte[] challengeHash = SHA256.HashData(Encoding.ASCII.GetBytes(m_codeVerifier));
-		string codeChallenge = Base64UrlEncode(challengeHash);
-		string pcSign = GeneratePcSign();
-		string authUrl = $"{EA_AUTH_URL}?client_id={EA_CLIENT_ID}"
-			+ $"&response_type=code"
-			+ $"&redirect_uri={Uri.EscapeDataString(EA_REDIRECT_URI)}"
-			+ $"&code_challenge={codeChallenge}"
-			+ $"&code_challenge_method=S256"
-			+ $"&pc_sign={Uri.EscapeDataString(pcSign)}";
-
-#if WINDOWS
-		Task.Run(async () =>
+		if (Interlocked.CompareExchange(ref m_eaAuthFlowInProgress, 1, 0) != 0)
 		{
-			try
+			Send(new JObject { ["type"] = "relinkEAResult", ["ok"] = false, ["error"] = "An EA sign-in window is already open." });
+			return;
+		}
+
+		try
+		{
+			string authUrl = BuildEaAuthUrl(out string codeVerifier);
+#if WINDOWS
+			_ = Task.Run(async () =>
 			{
-				var result = await EaLoginWindow.ShowAsync(authUrl, EA_REDIRECT_URI);
-				if (result.Cancelled)
+				try
 				{
-					Send(new JObject { ["type"] = "relinkEAResult", ["ok"] = false, ["error"] = "Login cancelled" });
-					return;
+					// Relinking uses the same embedded EA flow and callback interception
+					// as the initial sign-in; never launch the OS browser for qrc callbacks.
+					EaLoginWindowResult result = await EaLoginWindow.ShowAsync(authUrl, EA_REDIRECT_URI);
+
+					if (result.Cancelled)
+					{
+						Send(new JObject { ["type"] = "relinkEAResult", ["ok"] = false, ["error"] = "Login cancelled" });
+						return;
+					}
+					if (!string.IsNullOrEmpty(result.Error))
+					{
+						Send(new JObject { ["type"] = "relinkEAResult", ["ok"] = false, ["error"] = result.Error });
+						return;
+					}
+					if (string.IsNullOrEmpty(result.Code))
+					{
+						Send(new JObject { ["type"] = "relinkEAResult", ["ok"] = false, ["error"] = "No authorization code received" });
+						return;
+					}
+					await DoRelinkAsync(result.Code, codeVerifier);
 				}
-				if (!string.IsNullOrEmpty(result.Error))
+				catch (TimeoutException)
 				{
-					Send(new JObject { ["type"] = "relinkEAResult", ["ok"] = false, ["error"] = result.Error });
-					return;
+					Send(new JObject { ["type"] = "relinkEAResult", ["ok"] = false, ["error"] = "EA relinking timed out. Try again." });
 				}
-				await DoRelinkAsync(result.Code!);
-			}
-			catch (Exception ex)
-			{
-				Send(new JObject { ["type"] = "relinkEAResult", ["ok"] = false, ["error"] = ex.Message });
-			}
-		});
+				catch (Exception ex)
+				{
+					Send(new JObject { ["type"] = "relinkEAResult", ["ok"] = false, ["error"] = ex.Message });
+				}
+				finally
+				{
+					Interlocked.Exchange(ref m_eaAuthFlowInProgress, 0);
+				}
+			});
 #else
-		Send(new JObject { ["type"] = "relinkEAResult", ["ok"] = false, ["error"] = "Not supported on this platform" });
+			Interlocked.Exchange(ref m_eaAuthFlowInProgress, 0);
+			Send(new JObject { ["type"] = "relinkEAResult", ["ok"] = false, ["error"] = "EA sign-in windows are not available in this build." });
 #endif
+		}
+		catch (Exception ex)
+		{
+			Interlocked.Exchange(ref m_eaAuthFlowInProgress, 0);
+			Send(new JObject { ["type"] = "relinkEAResult", ["ok"] = false, ["error"] = "Could not prepare EA sign-in: " + ex.Message });
+		}
 	}
 
-	private async Task DoRelinkAsync(string code)
+	private async Task DoRelinkAsync(string code, string codeVerifier)
 	{
 		//don't update main auth session
 		var tokenBody = new FormUrlEncodedContent(new[]
@@ -474,7 +527,7 @@ public partial class MessageHandler
 			new KeyValuePair<string, string>("code", code),
 			new KeyValuePair<string, string>("client_id", EA_CLIENT_ID),
 			new KeyValuePair<string, string>("client_secret", EA_CLIENT_SECRET),
-			new KeyValuePair<string, string>("code_verifier", m_codeVerifier!),
+			new KeyValuePair<string, string>("code_verifier", codeVerifier),
 			new KeyValuePair<string, string>("redirect_uri", EA_REDIRECT_URI),
 			new KeyValuePair<string, string>("token_format", "JWS"),
 		});

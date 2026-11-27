@@ -13,6 +13,7 @@ internal static class Program
 {
 	private static readonly bool s_isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
 	internal static bool IsBrowserFallback { get; private set; }
+	internal static bool IsWineOrGameNative => IsRunningUnderWine() || IsGameNativeSession();
 
 	[DllImport("kernel32.dll")]
 	private static extern IntPtr GetModuleHandle(string moduleName);

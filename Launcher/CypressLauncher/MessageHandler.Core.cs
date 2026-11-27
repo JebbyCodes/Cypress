@@ -244,6 +244,18 @@ public partial class MessageHandler
 				case "selectGameDir":
 					OnSelectGameDir();
 					break;
+				case "selectServerIcon":
+					OnSelectServerIcon();
+					break;
+				case "browseFileSystem":
+					OnBrowseFileSystem((string?)msg["mode"], (string?)msg["path"]);
+					break;
+				case "setGameDirectory":
+					OnSetGameDirectory((string?)msg["path"]);
+					break;
+				case "selectServerIconPath":
+					OnSelectServerIconPath((string?)msg["path"]);
+					break;
 				case "autoFindDir":
 					OnAutoFindDir();
 					break;

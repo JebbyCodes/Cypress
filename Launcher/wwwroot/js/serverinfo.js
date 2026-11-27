@@ -1,44 +1,15 @@
 // server icon upload & preview
 
-const SERVER_ICON_MAX_SIZE = 64;
-
 function pickServerIcon() {
-    document.getElementById('serverIconInput').click();
+    openFilePicker('image');
 }
 
-function onServerIconSelected(input) {
-    if (!input.files || !input.files[0]) return;
-    const file = input.files[0];
-    const reader = new FileReader();
-    reader.onload = function (e) {
-        resizeServerIcon(e.target.result, function (b64) {
-            document.getElementById('serverIconData').value = b64;
-            const preview = document.getElementById('serverIconPreview');
-            preview.innerHTML = '<img src="data:image/jpeg;base64,' + b64 + '" alt="Server Icon" draggable="false">';
-            document.getElementById('clearIconBtn').style.display = '';
-        });
-    };
-    reader.readAsDataURL(file);
-    input.value = '';
-}
-
-function resizeServerIcon(dataUrl, callback) {
-    var img = new Image();
-    img.onload = function () {
-        var canvas = document.createElement('canvas');
-        canvas.width = SERVER_ICON_MAX_SIZE;
-        canvas.height = SERVER_ICON_MAX_SIZE;
-        var ctx = canvas.getContext('2d');
-        var scale = Math.max(SERVER_ICON_MAX_SIZE / img.width, SERVER_ICON_MAX_SIZE / img.height);
-        var w = img.width * scale;
-        var h = img.height * scale;
-        var x = (SERVER_ICON_MAX_SIZE - w) / 2;
-        var y = (SERVER_ICON_MAX_SIZE - h) / 2;
-        ctx.drawImage(img, x, y, w, h);
-        var jpegUrl = canvas.toDataURL('image/jpeg', 0.85);
-        callback(jpegUrl.split(',')[1]);
-    };
-    img.src = dataUrl;
+function applyServerIconBase64(b64) {
+    if (!b64) return;
+    document.getElementById('serverIconData').value = b64;
+    const preview = document.getElementById('serverIconPreview');
+    preview.innerHTML = '<img src="data:image/jpeg;base64,' + b64 + '" alt="Server Icon" draggable="false">';
+    document.getElementById('clearIconBtn').style.display = '';
 }
 
 function clearServerIcon() {

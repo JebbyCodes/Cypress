@@ -41,6 +41,31 @@ static class ImageHelper
         return Convert.ToBase64String(data.ToArray());
     }
 
+    public static string ResizeToSquareJpegBase64(string path, int size, int quality)
+    {
+        if (!File.Exists(path) || size <= 0) return string.Empty;
+        using var original = SKBitmap.Decode(path);
+        if (original == null || original.Width <= 0 || original.Height <= 0) return string.Empty;
+
+        using var surface = SKSurface.Create(new SKImageInfo(size, size, SKColorType.Rgba8888, SKAlphaType.Premul));
+        if (surface == null) return string.Empty;
+
+        var canvas = surface.Canvas;
+        canvas.Clear(SKColors.White);
+        float scale = Math.Max((float)size / original.Width, (float)size / original.Height);
+        float width = original.Width * scale;
+        float height = original.Height * scale;
+        float x = (size - width) / 2f;
+        float y = (size - height) / 2f;
+        using var paint = new SKPaint { IsAntialias = true, FilterQuality = SKFilterQuality.High };
+        canvas.DrawBitmap(original, new SKRect(x, y, x + width, y + height), paint);
+        canvas.Flush();
+
+        using var image = surface.Snapshot();
+        using var data = image.Encode(SKEncodedImageFormat.Jpeg, quality);
+        return Convert.ToBase64String(data.ToArray());
+    }
+
     public static string ResizeByWidthToJpegBase64(string path, int maxWidth, int quality)
     {
         if (!File.Exists(path)) return string.Empty;

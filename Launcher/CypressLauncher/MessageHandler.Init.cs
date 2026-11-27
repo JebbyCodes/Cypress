@@ -1,5 +1,6 @@
 #nullable enable
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Newtonsoft.Json.Linq;
@@ -31,6 +32,9 @@ public partial class MessageHandler
 
 	private void OnInit()
 	{
+		// The in-page picker is independent of WinForms, WebView2 native file
+		// chooser support and OS shell integration. It is available in every host.
+		Send(new JObject { ["type"] = "capabilities", ["filesystemPicker"] = true });
 		GetLastSelectedGame(out PVZGame lastGame);
 		m_selectedGame = lastGame;
 		LoadAndSendUserData(lastGame.ToString());
@@ -175,47 +179,164 @@ public partial class MessageHandler
 
 	private void OnSelectGameDir()
 	{
-#if WINDOWS
-		string? selected = WindowsSelectGameDir();
-		if (selected != null)
-		{
-			m_gameDirectory = selected;
-			Send(new JObject { ["type"] = "gameDir", ["path"] = selected });
-		}
-		else
-		{
-			SendStatus("Selected folder does not contain " + s_gameToExecutableName[m_selectedGame], "error");
-		}
-#else
-		SendStatus("On Linux, set the game directory by editing launcherdata.json in your Cypress appdata folder, or use auto-find.", "info");
-#endif
+		OnBrowseFileSystem("folder", null);
 	}
 
-#if WINDOWS
-	[System.Runtime.Versioning.SupportedOSPlatform("windows")]
-	private string? WindowsSelectGameDir()
+	private void OnSelectServerIcon()
 	{
-		string? selected = null;
-		var thread = new System.Threading.Thread(() =>
-		{
-			var dialog = new System.Windows.Forms.FolderBrowserDialog
-			{
-				Description = "Select " + s_gameToGameName[m_selectedGame] + "'s directory",
-				ShowNewFolderButton = false
-			};
-			if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK &&
-				!string.IsNullOrWhiteSpace(dialog.SelectedPath))
-			{
-				if (File.Exists(Path.Combine(dialog.SelectedPath, s_gameToExecutableName[m_selectedGame])))
-					selected = dialog.SelectedPath;
-			}
-		});
-		thread.SetApartmentState(System.Threading.ApartmentState.STA);
-		thread.Start();
-		thread.Join();
-		return selected;
+		OnBrowseFileSystem("image", null);
 	}
-#endif
+
+	private static readonly HashSet<string> s_imageExtensions = new(StringComparer.OrdinalIgnoreCase)
+	{
+		".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"
+	};
+
+	private void OnBrowseFileSystem(string? modeValue, string? requestedPath)
+	{
+		string mode = string.Equals(modeValue, "image", StringComparison.OrdinalIgnoreCase) ? "image" : "folder";
+		try
+		{
+			string path = requestedPath?.Trim() ?? "";
+			// A dedicated sentinel distinguishes the virtual drives view from the
+			// initial empty request, which should open the user's home directory.
+			bool showRoots = string.Equals(path, "__CYPRESS_ROOTS__", StringComparison.Ordinal);
+			if (path.Length == 0)
+			{
+				string preferred = mode == "folder" && Directory.Exists(m_gameDirectory)
+					? m_gameDirectory
+					: mode == "image"
+						? Environment.GetFolderPath(Environment.SpecialFolder.MyPictures)
+						: Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+				path = Directory.Exists(preferred) ? preferred : "";
+			}
+
+			var entries = new JArray();
+			string currentPath = "";
+			string? parentPath = null;
+			bool truncated = false;
+
+			if (showRoots || path.Length == 0)
+			{
+				string[] roots;
+				try { roots = Directory.GetLogicalDrives(); }
+				catch { roots = Array.Empty<string>(); }
+				if (roots.Length == 0)
+				{
+					string rootPath = Path.GetPathRoot(Path.GetFullPath(Path.DirectorySeparatorChar.ToString())) ?? Path.DirectorySeparatorChar.ToString();
+					roots = new[] { rootPath };
+				}
+				foreach (string drive in roots.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+					entries.Add(new JObject { ["name"] = drive, ["path"] = drive, ["isDirectory"] = true });
+			}
+			else
+			{
+				currentPath = Path.GetFullPath(path);
+				if (!Directory.Exists(currentPath))
+					throw new DirectoryNotFoundException("That folder does not exist or cannot be accessed.");
+				try { parentPath = Directory.GetParent(currentPath)?.FullName; } catch { }
+
+				var dirs = new List<DirectoryInfo>();
+				try
+				{
+					dirs.AddRange(new DirectoryInfo(currentPath).EnumerateDirectories()
+						.OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase)
+						.Take(500));
+				}
+				catch (UnauthorizedAccessException) { throw new UnauthorizedAccessException("Cypress cannot access this folder. Try one of its parent folders or another drive."); }
+				catch (IOException) { throw; }
+
+				foreach (DirectoryInfo dir in dirs)
+					entries.Add(new JObject { ["name"] = dir.Name, ["path"] = dir.FullName, ["isDirectory"] = true });
+
+				if (mode == "image")
+				{
+					var files = new List<FileInfo>();
+					try
+					{
+						files.AddRange(new DirectoryInfo(currentPath).EnumerateFiles()
+							.Where(f => s_imageExtensions.Contains(f.Extension))
+							.OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase)
+							.Take(500));
+					}
+					catch (UnauthorizedAccessException) { throw new UnauthorizedAccessException("Cypress cannot list files in this folder."); }
+					foreach (FileInfo file in files)
+						entries.Add(new JObject { ["name"] = file.Name, ["path"] = file.FullName, ["isDirectory"] = false });
+				}
+				truncated = entries.Count >= 500;
+			}
+
+			Send(new JObject
+			{
+				["type"] = "fileSystemListing",
+				["mode"] = mode,
+				["path"] = currentPath,
+				["parent"] = parentPath,
+				["entries"] = entries,
+				["truncated"] = truncated,
+				["ok"] = true
+			});
+		}
+		catch (Exception ex)
+		{
+			Send(new JObject
+			{
+				["type"] = "fileSystemListing",
+				["mode"] = mode,
+				["path"] = string.Equals(requestedPath, "__CYPRESS_ROOTS__", StringComparison.Ordinal) ? "" : requestedPath ?? "",
+				["entries"] = new JArray(),
+				["ok"] = false,
+				["error"] = ex.Message
+			});
+		}
+	}
+
+	private void OnSetGameDirectory(string? candidatePath)
+	{
+		try
+		{
+			if (string.IsNullOrWhiteSpace(candidatePath))
+				throw new InvalidOperationException("Choose a game folder first.");
+
+			string fullPath = Path.GetFullPath(candidatePath.Trim());
+			string executableName = s_gameToExecutableName[m_selectedGame];
+			if (!Directory.Exists(fullPath))
+				throw new DirectoryNotFoundException("That folder does not exist.");
+			if (!File.Exists(Path.Combine(fullPath, executableName)))
+				throw new InvalidOperationException("This folder does not contain " + executableName + ". Open the game's installation folder, not a parent folder.");
+
+			m_gameDirectory = fullPath;
+			SaveUserData(m_selectedGame.ToString());
+			Send(new JObject { ["type"] = "gameDir", ["path"] = fullPath });
+			SendStatus("Game directory set to: " + fullPath, "success");
+		}
+		catch (Exception ex)
+		{
+			SendStatus("Could not use that game folder: " + ex.Message, "error");
+		}
+	}
+
+	private void OnSelectServerIconPath(string? filePath)
+	{
+		try
+		{
+			if (string.IsNullOrWhiteSpace(filePath))
+				throw new InvalidOperationException("Choose an image first.");
+			string fullPath = Path.GetFullPath(filePath.Trim());
+			if (!File.Exists(fullPath) || !s_imageExtensions.Contains(Path.GetExtension(fullPath)))
+				throw new InvalidOperationException("Choose a PNG, JPG, WEBP, BMP, GIF or TIFF image.");
+
+			string imageData = ImageHelper.ResizeToSquareJpegBase64(fullPath, 64, 85);
+			if (string.IsNullOrEmpty(imageData))
+				throw new InvalidDataException("That image could not be decoded.");
+			Send(new JObject { ["type"] = "serverIconSelected", ["data"] = imageData });
+			SendStatus("Server icon selected.", "success");
+		}
+		catch (Exception ex)
+		{
+			SendStatus("Could not use that image: " + ex.Message, "error");
+		}
+	}
 
 	private string? TrySilentAutoFindDir()
 	{

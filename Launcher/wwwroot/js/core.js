@@ -127,7 +127,9 @@ cypressMessageBridge.receiveMessage(function (msg) {
                 document.getElementById('tosModalBackdrop').style.display = 'flex';
             }
             break;
+        case 'capabilities': window._nativeImagePickerEnabled = !!data.nativeImagePicker; window._filesystemPickerEnabled = !!data.filesystemPicker; break;
         case 'authStatus': handleAuthStatus(data); break;
+        case 'authLoginProgress': handleAuthLoginProgress(data); break;
         case 'authLoginResult': handleAuthLoginResult(data); break;
         case 'authLogoutResult': handleAuthLogoutResult(data); break;
         case 'identityStatus':
@@ -147,6 +149,8 @@ cypressMessageBridge.receiveMessage(function (msg) {
             break;
         case 'status': showStatus(data.text, data.level || 'info'); break;
         case 'gameDir': setGameDir(data.path); break;
+        case 'serverIconSelected': if (typeof applyServerIconBase64 === 'function') applyServerIconBase64(data.data); break;
+        case 'fileSystemListing': if (typeof onFileSystemListing === 'function') onFileSystemListing(data); break;
         case 'loadUserData': loadUserData(data); break;
         case 'modPacks': populateSelect('modPackSelect', data.packs); break;
         case 'playlists':

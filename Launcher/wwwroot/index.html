@@ -708,7 +708,6 @@
                                     <button type="button" class="btn btn-secondary btn-sm" onclick="pickServerIcon()" data-i18n="host.choose_image">Choose Image</button>
                                     <button type="button" class="btn btn-sm" onclick="clearServerIcon()" id="clearIconBtn" style="display:none;" data-i18n="host.clear_icon">Clear</button>
                                 </div>
-                                <input type="file" id="serverIconInput" accept="image/*" style="display:none" onchange="onServerIconSelected(this)">
                                 <input type="hidden" id="serverIconData">
                             </div>
                             <span class="field-hint" data-i18n="host.server_icon_hint">Optional 64x64 icon shown in the server preview. Large images are automatically resized.</span>
@@ -1700,6 +1699,26 @@
             <div class="pam-actions">
                 <button class="btn btn-secondary btn-sm" onclick="closePlayerActionModal()" data-i18n="common.cancel">Cancel</button>
                 <button class="btn btn-sm" id="pamConfirm" onclick="confirmPlayerAction()" data-i18n="common.confirm">Confirm</button>
+            </div>
+        </div>
+    </div>
+    <div class="file-picker-overlay" id="filePickerOverlay" style="display:none;" onclick="if(event.target===this)closeFilePicker()">
+        <div class="file-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="filePickerTitle">
+            <div class="file-picker-header">
+                <h3 class="file-picker-title" id="filePickerTitle">Choose a folder</h3>
+                <button type="button" class="btn btn-icon btn-sm" onclick="closeFilePicker()" aria-label="Close">×</button>
+            </div>
+            <div class="file-picker-pathbar">
+                <button type="button" class="btn btn-secondary btn-sm" id="filePickerUpBtn" onclick="filePickerNavigateUp()">Up</button>
+                <input type="text" id="filePickerPath" class="text-input" placeholder="Enter a folder path" autocomplete="off" spellcheck="false" onkeydown="if(event.key==='Enter')filePickerGoToPath()">
+                <button type="button" class="btn btn-secondary btn-sm" onclick="filePickerGoToPath()">Go</button>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="filePickerReload()" title="Refresh">↻</button>
+            </div>
+            <div class="file-picker-entries" id="filePickerEntries"><div class="file-picker-empty">Loading folders…</div></div>
+            <div class="file-picker-footer">
+                <div class="file-picker-status" id="filePickerStatus">Choose a location.</div>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="closeFilePicker()">Cancel</button>
+                <button type="button" class="btn btn-primary btn-sm" id="filePickerUseBtn" onclick="useFilePickerSelection()" disabled>Use this folder</button>
             </div>
         </div>
     </div>

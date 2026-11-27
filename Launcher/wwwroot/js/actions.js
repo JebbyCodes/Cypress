@@ -3,7 +3,7 @@ function setGameDir(path) {
     d.textContent = path || t('sidebar.no_dir');
     d.title = path || '';
 }
-function selectGameDirectory() { send('selectGameDir', {}); }
+function selectGameDirectory() { openFilePicker('folder'); }
 function autoFindDirectory() { send('autoFindDir', {}); }
 
 document.getElementById('useModsCheckbox').addEventListener('change', function () {

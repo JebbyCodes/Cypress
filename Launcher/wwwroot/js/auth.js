@@ -107,6 +107,22 @@ function handleAuthStatus(data) {
     send('init', {}); // load settings regardless of login state
 }
 
+function handleAuthLoginProgress(data) {
+    const status = document.getElementById('authStatus');
+    if (!status) return;
+
+    const stageMessages = {
+        opening: 'Opening the secure EA sign-in window…',
+        'window-opened': 'EA sign-in window opened. Preparing its secure browser…',
+        'preparing-browser': 'Starting the secure EA browser…',
+        'loading-ea': 'Loading the official EA sign-in page…',
+        ready: 'Complete sign-in in the EA window. Cypress will finish automatically.',
+        'navigation-failed': 'EA could not load its sign-in page. Check your connection, then retry.'
+    };
+    status.textContent = stageMessages[data.stage] || 'Preparing EA sign-in…';
+    status.className = 'auth-status waiting';
+}
+
 function handleAuthLoginResult(data) {
     const btn = document.getElementById('authLoginBtn');
     const status = document.getElementById('authStatus');

@@ -4,7 +4,6 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web;
-using Newtonsoft.Json.Linq;
 
 #if WINDOWS
 using System.Drawing;
@@ -18,56 +17,100 @@ namespace CypressLauncher;
 internal sealed record EaLoginWindowResult(string? Code, string? Error, bool Cancelled);
 
 #if WINDOWS
+/// <summary>
+/// Cypress-owned EA OAuth window. WebView2 intercepts EA's qrc callback before
+/// the URI can be handed to the operating system, avoiding an external-browser
+/// hand-off on hosts where qrc is not registered as an application link.
+/// </summary>
 internal sealed class EaLoginWindow : Form
 {
 	private readonly string m_authUrl;
 	private readonly string m_redirectUri;
 	private readonly WebView2 m_webView;
+	private readonly Label m_status;
 	private readonly TaskCompletionSource<EaLoginWindowResult> m_tcs;
+	private readonly Action<string>? m_progress;
 	private readonly string m_logPath;
+	private readonly System.Windows.Forms.Timer m_timeoutTimer;
 	private bool m_completed;
 
-	private EaLoginWindow(string authUrl, string redirectUri, TaskCompletionSource<EaLoginWindowResult> tcs)
+	private EaLoginWindow(string authUrl, string redirectUri, TaskCompletionSource<EaLoginWindowResult> tcs, Action<string>? progress)
 	{
 		m_authUrl = authUrl;
 		m_redirectUri = redirectUri;
 		m_tcs = tcs;
+		m_progress = progress;
 		m_logPath = Path.Combine(Path.GetTempPath(), "cypress_ea_auth.log");
 
 		Text = "EA Sign In";
 		StartPosition = FormStartPosition.CenterScreen;
-		MinimumSize = new Size(900, 700);
-		Size = new Size(1080, 820);
+		MinimumSize = new Size(720, 560);
+		Size = new Size(980, 760);
+		ShowInTaskbar = true;
+		// GameNative can leave newly-created Win32 windows behind its browser
+		// surface. Briefly pin the login window to the foreground so the user
+		// sees that the sign-in request actually opened.
+		TopMost = true;
+		Shown += (_, _) =>
+		{
+			try
+			{
+				Activate();
+				BringToFront();
+				BeginInvoke(new Action(() => TopMost = false));
+			}
+			catch { }
+		};
 
 		string iconPath = Path.Combine(AppContext.BaseDirectory, "assets", "cypressicons", "ico", "Burbank-CypressIcon.ico");
 		if (File.Exists(iconPath))
 			Icon = new Icon(iconPath);
 
-		m_webView = new WebView2
+		m_webView = new WebView2 { Dock = DockStyle.Fill };
+		m_status = new Label
 		{
-			Dock = DockStyle.Fill
+			Dock = DockStyle.Bottom,
+			Height = 30,
+			Padding = new Padding(10, 6, 10, 4),
+			Text = "Connecting to EA securely…",
+			AutoEllipsis = true,
+			BackColor = SystemColors.Control
 		};
 		Controls.Add(m_webView);
+		Controls.Add(m_status);
 
+		m_timeoutTimer = new System.Windows.Forms.Timer { Interval = 6 * 60 * 1000 };
+		m_timeoutTimer.Tick += (_, _) => Complete(new EaLoginWindowResult(null, "EA sign-in timed out. Please try again.", false));
+		Shown += (_, _) =>
+		{
+			ReportProgress("window-opened");
+			m_timeoutTimer.Start();
+		};
 		Load += OnLoadAsync;
 		FormClosed += OnFormClosed;
 	}
 
-	internal static Task<EaLoginWindowResult> ShowAsync(string authUrl, string redirectUri)
+	internal static Task<EaLoginWindowResult> ShowAsync(string authUrl, string redirectUri, Action<string>? progress = null)
 	{
 		var tcs = new TaskCompletionSource<EaLoginWindowResult>(TaskCreationOptions.RunContinuationsAsynchronously);
 		var thread = new Thread(() =>
 		{
-			Application.EnableVisualStyles();
-			Application.SetCompatibleTextRenderingDefault(false);
-			using var form = new EaLoginWindow(authUrl, redirectUri, tcs);
-			Application.Run(form);
+			try
+			{
+				WinFormsBootstrap.Initialize();
+				using var form = new EaLoginWindow(authUrl, redirectUri, tcs, progress);
+				Application.Run(form);
+			}
+			catch (Exception ex)
+			{
+				tcs.TrySetResult(new EaLoginWindowResult(null, "Could not create the EA sign-in window: " + ex.Message, false));
+			}
 		});
 
 		thread.IsBackground = true;
+		thread.Name = "Cypress.EA.SignIn";
 		thread.SetApartmentState(ApartmentState.STA);
 		thread.Start();
-
 		return tcs.Task;
 	}
 
@@ -75,87 +118,101 @@ internal sealed class EaLoginWindow : Form
 	{
 		try
 		{
-			Log("window load");
-			Log("auth url: " + m_authUrl);
-			Log("redirect uri: " + m_redirectUri);
+			Log("EA sign-in window opened");
+			ReportProgress("preparing-browser");
 			string userDataDir = Path.Combine(
 				Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-				"Cypress",
-				"WebView2",
-				"ea-auth");
+				"Cypress", "WebView2", "ea-auth");
 			Directory.CreateDirectory(userDataDir);
-			Log("user data dir: " + userDataDir);
-			var env = await CoreWebView2Environment.CreateAsync(null, userDataDir);
-			var opts = env.CreateCoreWebView2ControllerOptions();
-			opts.IsInPrivateModeEnabled = true;
-			await m_webView.EnsureCoreWebView2Async(env, opts);
-			m_webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
-			m_webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
-			m_webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
-			m_webView.CoreWebView2.Settings.IsZoomControlEnabled = true;
-			await m_webView.CoreWebView2.CallDevToolsProtocolMethodAsync("Network.enable", "{}");
-			var requestReceiver = m_webView.CoreWebView2.GetDevToolsProtocolEventReceiver("Network.requestWillBeSent");
-			requestReceiver.DevToolsProtocolEventReceived += OnDevToolsRequestWillBeSent;
-			m_webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
-			await m_webView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(BuildQrcInterceptScript());
-			m_webView.CoreWebView2.SourceChanged += OnSourceChanged;
-			m_webView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
-			m_webView.CoreWebView2.NavigationStarting += OnNavigationStarting;
-			m_webView.CoreWebView2.LaunchingExternalUriScheme += OnLaunchingExternalUriScheme;
-			m_webView.CoreWebView2.NewWindowRequested += OnNewWindowRequested;
-			m_webView.CoreWebView2.WebResourceResponseReceived += OnWebResourceResponseReceived;
-			Log("navigate start");
-			m_webView.CoreWebView2.Navigate(m_authUrl);
+
+			var envOptions = new CoreWebView2EnvironmentOptions();
+			if (Program.IsWineOrGameNative)
+				envOptions.AdditionalBrowserArguments = "--disable-gpu --disable-gpu-compositing --disable-features=VizDisplayCompositor";
+
+			var env = await CoreWebView2Environment.CreateAsync(null, userDataDir, envOptions)
+				.WaitAsync(TimeSpan.FromSeconds(45));
+			await m_webView.EnsureCoreWebView2Async(env).WaitAsync(TimeSpan.FromSeconds(45));
+
+			var core = m_webView.CoreWebView2;
+			// Keep the EA session in its own Cypress profile so users can complete
+			// MFA/password-manager flows without sharing the general browser profile.
+			core.Settings.AreDefaultContextMenusEnabled = true;
+			core.Settings.AreDevToolsEnabled = false;
+			core.Settings.IsStatusBarEnabled = true;
+			core.Settings.IsZoomControlEnabled = true;
+			core.ProcessFailed += OnProcessFailed;
+			core.SourceChanged += OnSourceChanged;
+			core.NavigationCompleted += OnNavigationCompleted;
+			core.NavigationStarting += OnNavigationStarting;
+			core.LaunchingExternalUriScheme += OnLaunchingExternalUriScheme;
+			core.NewWindowRequested += OnNewWindowRequested;
+			core.WebResourceResponseReceived += OnWebResourceResponseReceived;
+
+
+			SetStatus("Loading the secure EA sign-in page…");
+			Log("Navigating to EA authentication page");
+			ReportProgress("loading-ea");
+			core.Navigate(m_authUrl);
 		}
 		catch (Exception ex)
 		{
-			Log("load failed: " + ex);
-			Complete(new EaLoginWindowResult(null, "Failed to open embedded login: " + ex.Message, false));
+			Log("Embedded EA sign-in initialisation failed: " + ex.GetType().Name + ": " + ex.Message);
+			Complete(new EaLoginWindowResult(null, "Could not initialise the EA sign-in browser: " + ex.Message, false));
 		}
+	}
+
+	private void OnProcessFailed(object? sender, CoreWebView2ProcessFailedEventArgs e)
+	{
+		Log("WebView2 process failed: " + e.ProcessFailedKind);
+		Complete(new EaLoginWindowResult(null,
+			"The embedded EA browser stopped unexpectedly (" + e.ProcessFailedKind + "). Please try signing in again.", false));
 	}
 
 	private void OnSourceChanged(object? sender, CoreWebView2SourceChangedEventArgs e)
 	{
-		try { Log("source changed: " + (m_webView.CoreWebView2?.Source ?? "(null)")); } catch { }
+		try { Log("source changed: " + SafeUrlForLog(m_webView.CoreWebView2?.Source)); } catch { }
 	}
 
 	private void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
 	{
-		try
+		if (e.IsSuccess)
 		{
-			Log("nav completed: success=" + e.IsSuccess + " status=" + e.WebErrorStatus + " source=" + (m_webView.CoreWebView2?.Source ?? "(null)"));
+			SetStatus("EA page ready. Complete sign-in; this window will close when EA confirms it.");
+			ReportProgress("ready");
 		}
-		catch { }
+		else
+		{
+			SetStatus("EA page navigation failed: " + e.WebErrorStatus + ". Check your connection or close this window and try again.");
+			ReportProgress("navigation-failed");
+		}
+		Log("navigation completed: success=" + e.IsSuccess + " status=" + e.WebErrorStatus);
 	}
 
 	private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
 	{
-		Log("nav starting: " + (e.Uri ?? "(null)"));
+		Log("navigation starting: " + SafeUrlForLog(e.Uri));
 		if (string.IsNullOrEmpty(e.Uri) || !IsRedirectUriMatch(e.Uri))
 			return;
 
-		Log("nav starting matched redirect");
 		e.Cancel = true;
 		HandleRedirectUri(e.Uri);
 	}
 
 	private void OnLaunchingExternalUriScheme(object? sender, CoreWebView2LaunchingExternalUriSchemeEventArgs e)
 	{
-		Log("external uri: " + (e.Uri ?? "(null)"));
+		Log("external URI scheme requested: " + SafeUrlForLog(e.Uri));
 		if (string.IsNullOrEmpty(e.Uri) || !IsRedirectUriMatch(e.Uri))
 			return;
 
-		Log("external uri matched redirect");
 		e.Cancel = true;
 		HandleRedirectUri(e.Uri);
 	}
 
 	private void OnNewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
 	{
-		Log("new window: " + (e.Uri ?? "(null)"));
+		Log("new window requested: " + SafeUrlForLog(e.Uri));
 		if (!string.IsNullOrEmpty(e.Uri) && IsRedirectUriMatch(e.Uri))
 		{
-			Log("new window matched redirect");
 			e.Handled = true;
 			HandleRedirectUri(e.Uri);
 			return;
@@ -166,64 +223,17 @@ internal sealed class EaLoginWindow : Form
 			m_webView.CoreWebView2.Navigate(e.Uri);
 	}
 
-	private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
+	private void OnWebResourceResponseReceived(object? sender, CoreWebView2WebResourceResponseReceivedEventArgs e)
 	{
 		if (m_completed) return;
-
 		try
 		{
-			var uri = e.TryGetWebMessageAsString();
-			Log("web message: " + (uri ?? "(null)"));
-			if (!string.IsNullOrEmpty(uri) && IsRedirectUriMatch(uri))
-				HandleRedirectUri(uri);
-		}
-		catch { }
-	}
-
-	private async void OnWebResourceResponseReceived(object? sender, CoreWebView2WebResourceResponseReceivedEventArgs e)
-	{
-		if (m_completed) return;
-
-		try
-		{
-			Log("response: " + (e.Request?.Uri ?? "(null)"));
 			var response = e.Response;
-			if (response == null) return;
-			if (response.StatusCode < 300 || response.StatusCode >= 400) return;
+			if (response == null || response.StatusCode < 300 || response.StatusCode >= 400)
+				return;
 
 			string location = "";
 			try { location = response.Headers.GetHeader("Location") ?? ""; } catch { }
-			Log("response redirect location: " + (string.IsNullOrEmpty(location) ? "(none)" : location));
-			if (string.IsNullOrEmpty(location) || !IsRedirectUriMatch(location))
-				return;
-
-			HandleRedirectUri(location);
-		}
-		catch { }
-	}
-
-	private void OnDevToolsRequestWillBeSent(object? sender, CoreWebView2DevToolsProtocolEventReceivedEventArgs e)
-	{
-		if (m_completed) return;
-
-		try
-		{
-			var payload = JObject.Parse(e.ParameterObjectAsJson);
-			var requestUrl = (string?)payload["request"]?["url"] ?? "";
-			if (!string.IsNullOrEmpty(requestUrl))
-				Log("cdp request: " + requestUrl);
-			if (!string.IsNullOrEmpty(requestUrl) && IsRedirectUriMatch(requestUrl))
-			{
-				Log("cdp request matched redirect");
-				HandleRedirectUri(requestUrl);
-				return;
-			}
-
-			var locationToken = payload["redirectResponse"]?["headers"]?["Location"]
-				?? payload["redirectResponse"]?["headers"]?["location"];
-			var location = (string?)locationToken ?? "";
-			if (!string.IsNullOrEmpty(location))
-				Log("cdp redirect location: " + location);
 			if (!string.IsNullOrEmpty(location) && IsRedirectUriMatch(location))
 				HandleRedirectUri(location);
 		}
@@ -233,39 +243,26 @@ internal sealed class EaLoginWindow : Form
 	private void HandleRedirectUri(string uri)
 	{
 		if (m_completed) return;
-		uri = NormalizeRedirectUri(uri);
-		Log("handle redirect: " + uri);
-
-		var queryIndex = uri.IndexOf('?');
-		var query = queryIndex >= 0 ? HttpUtility.ParseQueryString(uri.Substring(queryIndex)) : HttpUtility.ParseQueryString("");
-		string? code = query["code"];
-		string? error = query["error"];
-
-		if (!string.IsNullOrEmpty(error))
+		if (!TryExtractAuthorizationCode(uri, m_redirectUri, out string? code, out string? error))
 		{
-			Log("redirect had error: " + error);
-			Complete(new EaLoginWindowResult(null, error, false));
+			Log("EA callback arrived without an authorization code");
+			Complete(new EaLoginWindowResult(null, error ?? "EA did not return an authorization code.", false));
 			return;
 		}
 
-		if (string.IsNullOrEmpty(code))
-		{
-			Log("redirect missing code");
-			Complete(new EaLoginWindowResult(null, "No authorization code received", false));
-			return;
-		}
-
-		Log("redirect got code");
+		Log("EA callback received an authorization code");
 		Complete(new EaLoginWindowResult(code, null, false));
 	}
 
 	private bool IsRedirectUriMatch(string uri)
 	{
-		var normalized = NormalizeRedirectUri(uri);
-		return normalized.StartsWith(m_redirectUri, StringComparison.OrdinalIgnoreCase);
+		string normalized = NormalizeRedirectUri(uri);
+		if (!normalized.StartsWith(m_redirectUri, StringComparison.OrdinalIgnoreCase))
+			return false;
+		return normalized.Length == m_redirectUri.Length || normalized[m_redirectUri.Length] is '?' or '#';
 	}
 
-	private string NormalizeRedirectUri(string uri)
+	private static string NormalizeRedirectUri(string uri)
 	{
 		if (string.IsNullOrEmpty(uri)) return uri;
 		if (uri.StartsWith("qrc:/", StringComparison.OrdinalIgnoreCase) && !uri.StartsWith("qrc:///", StringComparison.OrdinalIgnoreCase))
@@ -273,68 +270,69 @@ internal sealed class EaLoginWindow : Form
 		return uri;
 	}
 
-	private string BuildQrcInterceptScript()
+	internal static bool TryExtractAuthorizationCode(string input, string redirectUri, out string? code, out string? error)
 	{
-		var redirect = m_redirectUri.Replace("\\", "\\\\").Replace("'", "\\'");
-		return @"
-(() => {
-  const redirectPrefix = '__REDIRECT__';
-  const send = (value) => {
-    try {
-      if (typeof value === 'string' && value.startsWith(redirectPrefix)) {
-        chrome.webview.postMessage(value);
-        return true;
-      }
-    } catch (e) {}
-    return false;
-  };
+		code = null;
+		error = null;
+		if (string.IsNullOrWhiteSpace(input))
+		{
+			error = "EA returned an empty sign-in response. Close this window and try again.";
+			return false;
+		}
 
-  const normalize = (value) => {
-    try {
-      return String(value || '');
-    } catch (e) {
-      return '';
-    }
-  };
+		string value = NormalizeRedirectUri(input.Trim().Trim('"', '\''));
+		if (!value.StartsWith(redirectUri, StringComparison.OrdinalIgnoreCase) ||
+			(value.Length > redirectUri.Length && value[redirectUri.Length] is not '?' and not '#'))
+		{
+			error = "EA returned an unexpected sign-in redirect. Close this window and try again.";
+			return false;
+		}
 
-  const wrapNav = (fn) => function(value) {
-    const url = normalize(value);
-    if (send(url)) return;
-    return fn.apply(this, arguments);
-  };
+		int fragmentIndex = value.IndexOf('#');
+		string fragment = fragmentIndex >= 0 ? value[(fragmentIndex + 1)..] : "";
+		string beforeFragment = fragmentIndex >= 0 ? value[..fragmentIndex] : value;
+		int queryIndex = beforeFragment.IndexOf('?');
+		string query = queryIndex >= 0 ? beforeFragment[(queryIndex + 1)..] : "";
+		var queryValues = HttpUtility.ParseQueryString(query);
+		var fragmentValues = HttpUtility.ParseQueryString(fragment.TrimStart('?'));
+		string? callbackError = queryValues["error"] ?? fragmentValues["error"];
+		if (!string.IsNullOrWhiteSpace(callbackError))
+		{
+			string description = queryValues["error_description"] ?? fragmentValues["error_description"] ?? callbackError;
+			error = "EA sign-in was not completed: " + description;
+			return false;
+		}
 
-  try {
-    const open = window.open;
-    window.open = function(url) {
-      const value = normalize(url);
-      if (send(value)) return null;
-      return open.apply(this, arguments);
-    };
-  } catch (e) {}
+		code = queryValues["code"] ?? fragmentValues["code"];
+		if (string.IsNullOrWhiteSpace(code))
+		{
+			error = "The EA return URL did not contain an authorization code. Please retry sign-in.";
+			return false;
+		}
+		return true;
+	}
 
-  try { window.location.assign = wrapNav(window.location.assign.bind(window.location)); } catch (e) {}
-  try { window.location.replace = wrapNav(window.location.replace.bind(window.location)); } catch (e) {}
+	private void ReportProgress(string stage)
+	{
+		try { m_progress?.Invoke(stage); } catch { }
+	}
 
-  document.addEventListener('click', (event) => {
-    const anchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;
-    if (!anchor) return;
-    const href = normalize(anchor.href);
-    if (send(href)) event.preventDefault();
-  }, true);
-
-  document.addEventListener('submit', (event) => {
-    const form = event.target;
-    if (!form || !form.action) return;
-    const action = normalize(form.action);
-    if (send(action)) event.preventDefault();
-  }, true);
-})();
-".Replace("__REDIRECT__", redirect);
+	private void SetStatus(string message)
+	{
+		if (m_status.IsDisposed) return;
+		if (m_status.InvokeRequired)
+		{
+			try { m_status.BeginInvoke(new Action(() => m_status.Text = message)); } catch { }
+		}
+		else
+			m_status.Text = message;
 	}
 
 	private void OnFormClosed(object? sender, FormClosedEventArgs e)
 	{
-		Log("window closed");
+		m_timeoutTimer.Stop();
+		m_timeoutTimer.Dispose();
+		Log("EA sign-in window closed");
 		if (!m_completed)
 			m_tcs.TrySetResult(new EaLoginWindowResult(null, null, true));
 	}
@@ -343,20 +341,29 @@ internal sealed class EaLoginWindow : Form
 	{
 		if (m_completed) return;
 		m_completed = true;
-		Log("complete: cancelled=" + result.Cancelled + " error=" + (result.Error ?? "(none)") + " code=" + (string.IsNullOrEmpty(result.Code) ? "(none)" : "present"));
+		m_timeoutTimer.Stop();
+		Log("EA sign-in flow ended: cancelled=" + result.Cancelled + " error=" + (!string.IsNullOrEmpty(result.Error)) + " code=" + (!string.IsNullOrEmpty(result.Code)));
 		m_tcs.TrySetResult(result);
-		if (IsHandleCreated)
-			BeginInvoke(new Action(Close));
-		else
-			Close();
+		try
+		{
+			if (IsHandleCreated && !IsDisposed)
+				BeginInvoke(new Action(Close));
+			else if (!IsDisposed)
+				Close();
+		}
+		catch { }
+	}
+
+	private static string SafeUrlForLog(string? raw)
+	{
+		if (string.IsNullOrWhiteSpace(raw)) return "(empty)";
+		int query = raw.IndexOfAny(new[] { '?', '#' });
+		return query >= 0 ? raw[..query] + "?[redacted]" : raw;
 	}
 
 	private void Log(string message)
 	{
-		try
-		{
-			File.AppendAllText(m_logPath, $"[{DateTime.Now:O}] {message}{Environment.NewLine}");
-		}
+		try { File.AppendAllText(m_logPath, $"[{DateTime.Now:O}] {message}{Environment.NewLine}"); }
 		catch { }
 	}
 }

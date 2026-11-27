@@ -1,0 +1,30 @@
+/* Cypress-rendered filesystem picker: no host-native dialog required. */
+.file-picker-overlay {
+    position: fixed; inset: 0; z-index: 100000; display: none;
+    align-items: center; justify-content: center; padding: 18px;
+    background: rgba(0, 0, 0, .72); backdrop-filter: blur(5px);
+}
+.file-picker-dialog {
+    width: min(760px, 96vw); max-height: min(760px, 92vh); min-height: 420px;
+    display: flex; flex-direction: column; overflow: hidden;
+    background: var(--bg-secondary, #282828); color: var(--text-primary, #ebdbb2);
+    border: 1px solid var(--border, #504945); border-radius: 14px;
+    box-shadow: 0 24px 80px rgba(0,0,0,.55);
+}
+.file-picker-header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px 18px; border-bottom:1px solid var(--border, #504945); }
+.file-picker-title { margin:0; font-size:18px; font-weight:700; }
+.file-picker-pathbar { display:flex; gap:8px; padding:12px 16px; border-bottom:1px solid var(--border, #504945); }
+.file-picker-pathbar input { min-width:0; flex:1; }
+.file-picker-entries { flex:1; min-height:180px; overflow:auto; padding:8px 12px; }
+.file-picker-entry { width:100%; display:flex; align-items:center; gap:8px; padding:3px 5px; border:1px solid transparent; border-radius:8px; }
+.file-picker-entry:hover { background:var(--bg-tertiary, #32302f); }
+.file-picker-entry.selected { background:rgba(214,93,14,.16); border-color:var(--accent, #d65d0e); }
+.file-picker-entry-select { flex:1; min-width:0; display:flex; align-items:center; gap:12px; text-align:left; padding:7px; border:0; color:inherit; background:transparent; cursor:pointer; }
+.file-picker-entry-open { flex:0 0 auto; min-width:58px; padding:6px 9px; border:1px solid var(--border, #504945); border-radius:6px; color:var(--text-primary, #ebdbb2); background:transparent; cursor:pointer; }
+.file-picker-entry-open:hover { border-color:var(--accent, #d65d0e); }
+.file-picker-entry-icon { width:24px; flex:0 0 24px; }
+.file-picker-entry-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.file-picker-empty { padding:28px 18px; text-align:center; color:var(--text-muted, #a89984); }
+.file-picker-footer { display:flex; align-items:center; gap:10px; padding:12px 16px; border-top:1px solid var(--border, #504945); }
+.file-picker-status { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; color:var(--text-muted, #a89984); }
+@media(max-width:560px) { .file-picker-overlay{padding:6px}.file-picker-dialog{width:100%;max-height:96vh;min-height:360px}.file-picker-pathbar{flex-wrap:wrap}.file-picker-pathbar input{flex-basis:100%;order:1}.file-picker-footer{flex-wrap:wrap}.file-picker-status{flex-basis:100%;order:2} }

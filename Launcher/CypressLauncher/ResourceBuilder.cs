@@ -29,6 +29,7 @@ internal static class ResourceBuilder
 		"wwwroot.css.browser.css",
 		"wwwroot.css.auth.css",
 		"wwwroot.css.moderator.css",
+		"wwwroot.css.filepicker.css",
 	};
 
 	private static readonly string[] s_jsOrder =
@@ -48,6 +49,7 @@ internal static class ResourceBuilder
 		"wwwroot.js.actions.js",
 		"wwwroot.js.motd.js",
 		"wwwroot.js.serverinfo.js",
+		"wwwroot.js.filepicker.js",
 		"wwwroot.js.browser.js",
 		"wwwroot.js.playlist.js",
 		"wwwroot.js.instances.js",
