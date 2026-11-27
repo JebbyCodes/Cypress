@@ -299,3 +299,4 @@ window.addEventListener('DOMContentLoaded', () => {
     populateLevelPicker(true);
     populateModePicker();
     renderPickerOptions('levelPicker');
+});

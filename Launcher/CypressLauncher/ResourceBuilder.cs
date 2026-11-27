@@ -88,53 +88,54 @@ internal static class ResourceBuilder
 
 	private static string BuildBrowserBridgeScript(string token)
 	{
-		// The token is generated from hexadecimal characters only, so it is safe to
-		// embed in this script as a path segment.
-		return $"""
+		// Use a non-interpolated raw string so JavaScript object/function braces are
+		// preserved literally. Only the unique token placeholder is substituted.
+		const string tokenPlaceholder = "__CYPRESS_BROWSER_BRIDGE_TOKEN__";
+		string script = """
 <script>
-(() => {{
-    const apiRoot = '/{token}/api/';
+(() => {
+    const apiRoot = '/__CYPRESS_BROWSER_BRIDGE_TOKEN__/api/';
     let receiveCallback = null;
     let cursor = 0;
     let polling = false;
 
-    async function pollMessages() {{
+    async function pollMessages() {
         if (polling) return;
         polling = true;
-        while (receiveCallback) {{
-            try {{
-                const response = await fetch(apiRoot + 'poll?after=' + cursor, {{ cache: 'no-store' }});
+        while (receiveCallback) {
+            try {
+                const response = await fetch(apiRoot + 'poll?after=' + cursor, { cache: 'no-store' });
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 const messages = await response.json();
-                for (const item of messages) {{
+                for (const item of messages) {
                     cursor = Math.max(cursor, Number(item.id) || cursor);
                     receiveCallback(item.message);
-                }}
-            }} catch (error) {{
+                }
+            } catch (error) {
                 console.warn('Cypress browser bridge disconnected; retrying.', error);
                 await new Promise(resolve => setTimeout(resolve, 1200));
-            }}
-        }}
+            }
+        }
         polling = false;
-    }}
+    }
 
-    window.cypressBridge = {{
-        sendMessage(message) {{
-            return fetch(apiRoot + 'send', {{
+    window.cypressBridge = {
+        sendMessage(message) {
+            return fetch(apiRoot + 'send', {
                 method: 'POST',
-                headers: {{ 'Content-Type': 'application/json; charset=utf-8' }},
+                headers: { 'Content-Type': 'application/json; charset=utf-8' },
                 body: String(message)
-            }}).catch(error => console.error('Cypress message could not be delivered.', error));
-        }},
-        receiveMessage(callback) {{
+            }).catch(error => console.error('Cypress message could not be delivered.', error));
+        },
+        receiveMessage(callback) {
             receiveCallback = callback;
             pollMessages();
-        }}
-    }};
+        }
+    };
 
     // Give users a clear way to close the background launcher process when
     // running in browser-hosted compatibility mode.
-    const addFallbackNotice = () => {{
+    const addFallbackNotice = () => {
         const notice = document.createElement('div');
         notice.style.cssText = 'position:fixed;top:8px;right:8px;z-index:2147483647;display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:8px;background:#282828;color:#ebdbb2;font:12px system-ui;box-shadow:0 2px 12px #0008;';
         const label = document.createElement('span');
@@ -143,15 +144,16 @@ internal static class ResourceBuilder
         close.type = 'button';
         close.textContent = 'Exit Cypress';
         close.style.cssText = 'border:0;border-radius:5px;padding:5px 8px;background:#d65d0e;color:#fff;font:600 12px system-ui;cursor:pointer;';
-        close.addEventListener('click', () => window.cypressBridge.sendMessage(JSON.stringify({{ type: 'windowClose' }})));
+        close.addEventListener('click', () => window.cypressBridge.sendMessage(JSON.stringify({ type: 'windowClose' })));
         notice.append(label, close);
         document.body.appendChild(notice);
-    }};
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', addFallbackNotice, {{ once: true }});
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', addFallbackNotice, { once: true });
     else addFallbackNotice();
-}})();
+})();
 </script>
 """;
+		return script.Replace(tokenPlaceholder, token, StringComparison.Ordinal);
 	}
 
 	private static string GetLogoBase64(int size)

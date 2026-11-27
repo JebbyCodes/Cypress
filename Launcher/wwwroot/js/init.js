@@ -1,3 +1,4 @@
+document.addEventListener('DOMContentLoaded', () => {
     renderPickerOptions('modePicker');
     renderPickerOptions('browserFilterGame');
     updatePickerTrigger('browserFilterGame');
