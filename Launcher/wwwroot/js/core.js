@@ -89,10 +89,11 @@ function cypressConfirm(title, body) { return _showCypressDialog(title, body, 'c
 function cypressPrompt(title, body, defaultVal) { return _showCypressDialog(title, body, 'prompt', defaultVal); }
 
 
+const cypressMessageBridge = window.cypressBridge || window.external;
 function send(type, data) {
-    window.external.sendMessage(JSON.stringify({ type, ...data }));
+    cypressMessageBridge.sendMessage(JSON.stringify({ type, ...data }));
 }
-window.external.receiveMessage(function (msg) {
+cypressMessageBridge.receiveMessage(function (msg) {
     try {
     const data = JSON.parse(msg);
     switch (data.type) {

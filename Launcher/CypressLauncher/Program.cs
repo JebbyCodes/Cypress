@@ -3,6 +3,7 @@ using System;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using Photino.NET;
 
 namespace CypressLauncher;
@@ -10,6 +11,12 @@ namespace CypressLauncher;
 internal static class Program
 {
 	private static readonly bool s_isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+	internal static bool IsBrowserFallback { get; private set; }
+
+	[DllImport("kernel32.dll")]
+	private static extern IntPtr GetModuleHandle(string moduleName);
+	[DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true, SetLastError = true)]
+	private static extern IntPtr GetProcAddress(IntPtr module, string procName);
 
 	[DllImport("kernel32.dll")]
 	private static extern bool AttachConsole(int dwProcessId);
@@ -115,11 +122,19 @@ internal static class Program
 				return;
 			}
 
+			var handler = new MessageHandler();
+			if (ShouldUseBrowserFallback())
+			{
+				IsBrowserFallback = true;
+				RunBrowserFallback(handler);
+				handler.KillAllInstances();
+				return;
+			}
+
 #if WINDOWS
 			SetCurrentProcessExplicitAppUserModelID("CypressLauncher.App");
 #endif
 
-			var handler = new MessageHandler();
 			string html = ResourceBuilder.BuildHtml(Assembly.GetExecutingAssembly());
 			string iconPath = Path.Combine(AppContext.BaseDirectory, "assets", "cypressicons", "ico", "Burbank-CypressIcon.ico");
 
@@ -196,6 +211,54 @@ internal static class Program
 			WindowsMessageBox("Fatal error:\n" + ex.ToString(), "Cypress Launcher Error");
 #endif
 		}
+	}
+
+	private static bool ShouldUseBrowserFallback()
+	{
+		string? configured = Environment.GetEnvironmentVariable("CYPRESS_BROWSER_MODE");
+		if (configured == "1" || string.Equals(configured, "true", StringComparison.OrdinalIgnoreCase))
+			return true;
+		if (configured == "0" || string.Equals(configured, "false", StringComparison.OrdinalIgnoreCase))
+			return false;
+
+		// Wine exports wine_get_version from ntdll. Its presence is a reliable
+		// indicator that the Windows build is running through Wine/Proton.
+		try
+		{
+			IntPtr ntdll = GetModuleHandle("ntdll.dll");
+			return ntdll != IntPtr.Zero && GetProcAddress(ntdll, "wine_get_version") != IntPtr.Zero;
+		}
+		catch { return false; }
+	}
+
+	private static void RunBrowserFallback(MessageHandler handler)
+	{
+		string token = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
+		string html = ResourceBuilder.BuildHtml(Assembly.GetExecutingAssembly(), token);
+		using var browser = new BrowserFallbackHost(handler, html, token);
+		handler.SetBrowserMessageSender(browser.SendToBrowser);
+		string url = browser.Start();
+
+		string? infoPath = null;
+		try
+		{
+			string appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Cypress");
+			Directory.CreateDirectory(appData);
+			infoPath = Path.Combine(appData, "browser-fallback-url.txt");
+			File.WriteAllText(infoPath,
+				"Cypress is using its external-browser compatibility mode because it detected Wine/Proton.\r\n\r\n" +
+				"Open this address in the device browser while Cypress is running:\r\n" + url + "\r\n\r\n" +
+				"The address is local to this device and contains a temporary access token. Do not share it.");
+		}
+		catch { }
+
+		Console.Error.WriteLine("Cypress detected Wine/Proton and skipped Photino/WebView2.");
+		Console.Error.WriteLine("Open the Cypress UI in the device browser: " + url);
+		if (infoPath != null)
+			Console.Error.WriteLine("Browser URL saved to: " + infoPath);
+
+		browser.TryOpenBrowser();
+		browser.WaitForShutdown();
 	}
 
 #if WINDOWS

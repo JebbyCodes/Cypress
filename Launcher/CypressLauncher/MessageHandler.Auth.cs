@@ -76,6 +76,17 @@ public partial class MessageHandler
 
 	private void OnEaLogin()
 	{
+		if (Program.IsBrowserFallback)
+		{
+			Send(new JObject
+			{
+				["type"] = "authLoginResult",
+				["ok"] = false,
+				["error"] = "EA sign-in currently requires the embedded WebView2 browser, which is unavailable in this Wine/Proton browser fallback. You can continue using Cypress without linking an EA account."
+			});
+			return;
+		}
+
 		CleanupLegacyQrcHandler();
 
 		var verifierBytes = new byte[32];
@@ -411,6 +422,17 @@ public partial class MessageHandler
 
 	private void OnRelinkEA()
 	{
+		if (Program.IsBrowserFallback)
+		{
+			Send(new JObject
+			{
+				["type"] = "relinkEAResult",
+				["ok"] = false,
+				["error"] = "EA relinking requires the embedded WebView2 browser, which is unavailable in this Wine/Proton browser fallback."
+			});
+			return;
+		}
+
 		if (m_eaRelinked)
 		{
 			Send(new JObject { ["type"] = "relinkEAResult", ["ok"] = false, ["error"] = "Already relinked once" });

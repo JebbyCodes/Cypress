@@ -81,6 +81,7 @@ public partial class MessageHandler
 	}
 
 	private PhotinoWindow? m_window;
+	private Action<string>? m_browserMessageSender;
 	private readonly Dictionary<int, GameInstance> m_instances = new();
 	private readonly Dictionary<int, ExternalInstance> m_externalInstances = new();
 	private readonly object m_instanceLock = new();
@@ -174,9 +175,20 @@ public partial class MessageHandler
 		return num ^ ((num << 16) ^ (num >> 16));
 	}
 
+	internal void SetBrowserMessageSender(Action<string> sender)
+	{
+		m_browserMessageSender = sender;
+	}
+
 	private void Send(JObject data)
 	{
-		m_window?.SendWebMessage(data.ToString(Newtonsoft.Json.Formatting.None));
+		string message = data.ToString(Newtonsoft.Json.Formatting.None);
+		if (m_browserMessageSender != null)
+		{
+			m_browserMessageSender(message);
+			return;
+		}
+		m_window?.SendWebMessage(message);
 	}
 
 	private void SendStatus(string text, string level = "info")
@@ -260,6 +272,11 @@ public partial class MessageHandler
 					m_window?.SetMaximized(m_window?.Maximized != true);
 					break;
 				case "windowClose":
+					if (Program.IsBrowserFallback)
+					{
+						KillAllInstances();
+						Environment.Exit(0);
+					}
 					m_window?.SetMinimized(true);
 					ShowTrayIcon();
 					break;

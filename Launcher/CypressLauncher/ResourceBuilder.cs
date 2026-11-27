@@ -57,7 +57,7 @@ internal static class ResourceBuilder
 		"wwwroot.js.init.js",
 	};
 
-	public static string BuildHtml(Assembly assembly)
+	public static string BuildHtml(Assembly assembly, string? browserBridgeToken = null)
 	{
 		string html = ReadEmbeddedResource(assembly, "wwwroot.index.html");
 		string css = ConcatEmbeddedResources(assembly, s_cssOrder);
@@ -77,7 +77,81 @@ internal static class ResourceBuilder
 		html = html.Replace("<link rel=\"stylesheet\" href=\"styles.css\">", "<style>" + css + "</style>");
 		html = html.Replace("<script src=\"app.js\"></script>", "<script>" + js + "</script>");
 
+		if (!string.IsNullOrWhiteSpace(browserBridgeToken))
+		{
+			string bridgeScript = BuildBrowserBridgeScript(browserBridgeToken);
+			html = html.Replace("</head>", bridgeScript + "\n</head>", StringComparison.OrdinalIgnoreCase);
+		}
+
 		return html;
+	}
+
+	private static string BuildBrowserBridgeScript(string token)
+	{
+		// The token is generated from hexadecimal characters only, so it is safe to
+		// embed in this script as a path segment.
+		return $"""
+<script>
+(() => {{
+    const apiRoot = '/{token}/api/';
+    let receiveCallback = null;
+    let cursor = 0;
+    let polling = false;
+
+    async function pollMessages() {{
+        if (polling) return;
+        polling = true;
+        while (receiveCallback) {{
+            try {{
+                const response = await fetch(apiRoot + 'poll?after=' + cursor, {{ cache: 'no-store' }});
+                if (!response.ok) throw new Error('HTTP ' + response.status);
+                const messages = await response.json();
+                for (const item of messages) {{
+                    cursor = Math.max(cursor, Number(item.id) || cursor);
+                    receiveCallback(item.message);
+                }}
+            }} catch (error) {{
+                console.warn('Cypress browser bridge disconnected; retrying.', error);
+                await new Promise(resolve => setTimeout(resolve, 1200));
+            }}
+        }}
+        polling = false;
+    }}
+
+    window.cypressBridge = {{
+        sendMessage(message) {{
+            return fetch(apiRoot + 'send', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json; charset=utf-8' }},
+                body: String(message)
+            }}).catch(error => console.error('Cypress message could not be delivered.', error));
+        }},
+        receiveMessage(callback) {{
+            receiveCallback = callback;
+            pollMessages();
+        }}
+    }};
+
+    // Give users a clear way to close the background launcher process when
+    // running in browser-hosted compatibility mode.
+    const addFallbackNotice = () => {{
+        const notice = document.createElement('div');
+        notice.style.cssText = 'position:fixed;top:8px;right:8px;z-index:2147483647;display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:8px;background:#282828;color:#ebdbb2;font:12px system-ui;box-shadow:0 2px 12px #0008;';
+        const label = document.createElement('span');
+        label.textContent = 'Cypress browser compatibility mode';
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Exit Cypress';
+        close.style.cssText = 'border:0;border-radius:5px;padding:5px 8px;background:#d65d0e;color:#fff;font:600 12px system-ui;cursor:pointer;';
+        close.addEventListener('click', () => window.cypressBridge.sendMessage(JSON.stringify({{ type: 'windowClose' }})));
+        notice.append(label, close);
+        document.body.appendChild(notice);
+    }};
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', addFallbackNotice, {{ once: true }});
+    else addFallbackNotice();
+}})();
+</script>
+""";
 	}
 
 	private static string GetLogoBase64(int size)
