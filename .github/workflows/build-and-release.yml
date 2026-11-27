@@ -24,7 +24,9 @@ permissions:
 
 jobs:
   server:
-    runs-on: windows-latest
+    # This job requires the Visual Studio 2022 CMake generator below.
+    # windows-latest now points to the Visual Studio 2026 image.
+    runs-on: windows-2022
     strategy:
       matrix:
         game: [GW1, GW2, BFN]
@@ -37,7 +39,7 @@ jobs:
         working-directory: Server
         shell: pwsh
         run: |
-          cmake --fresh . -B build -G "Visual Studio 17 2022" -DCYPRESS_${{ matrix.game }}=ON
+          cmake --fresh -S . -B build -G "Visual Studio 17 2022" -A x64 -DCYPRESS_${{ matrix.game }}=ON
           cmake --build build --config Release
 
       - name: Upload DLL
