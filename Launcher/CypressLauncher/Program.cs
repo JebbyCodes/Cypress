@@ -33,20 +33,68 @@ internal static class Program
 	private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
 	[DllImport("shcore.dll")]
 	private static extern int GetDpiForMonitor(IntPtr hMon, int dpiType, out uint dpiX, out uint dpiY);
-	[DllImport("user32.dll")]
+	[DllImport("user32.dll", SetLastError = true)]
 	private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 	private const uint SWP_NOMOVE = 0x0002;
 	private const uint SWP_NOZORDER = 0x0004;
 
 	private static void ApplyPhysicalSize(PhotinoWindow window, int logicalW, int logicalH)
 	{
+		// Photino's SetSize uses logical pixels. This adjustment is only needed on
+		// Windows, but DPI APIs are not consistently implemented by Wine/Proton.
+		// In particular, GetDpiForMonitor can fail or return zero there. Never pass
+		// a zero-sized rectangle to SetWindowPos: that leaves the launcher invisible.
 		var hwnd = window.WindowHandle;
-		var mon = MonitorFromWindow(hwnd, 2); // MONITOR_DEFAULTTONEAREST
-		GetDpiForMonitor(mon, 0, out uint dpiX, out _);
+		if (hwnd == IntPtr.Zero)
+		{
+			Console.Error.WriteLine("[debug] Skipping physical sizing: window handle is not ready.");
+			return;
+		}
+
+		uint dpiX = 96;
+		try
+		{
+			var mon = MonitorFromWindow(hwnd, 2); // MONITOR_DEFAULTTONEAREST
+			if (mon != IntPtr.Zero)
+			{
+				int result = GetDpiForMonitor(mon, 0, out uint reportedDpiX, out _);
+				// 48-768 DPI is a deliberately broad sanity range. An HRESULT failure,
+				// a missing Wine export, or a zero DPI all fall back to 96 DPI.
+				if (result >= 0 && reportedDpiX is >= 48 and <= 768)
+					dpiX = reportedDpiX;
+				else
+					Console.Error.WriteLine($"[debug] GetDpiForMonitor returned 0x{result:X8} and dpi={reportedDpiX}; using 96 DPI.");
+			}
+		}
+		catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+		{
+			Console.Error.WriteLine("[debug] DPI API unavailable; using 96 DPI: " + ex.Message);
+		}
+
 		int physW = (int)Math.Round(logicalW * dpiX / 96.0);
 		int physH = (int)Math.Round(logicalH * dpiX / 96.0);
+		if (physW <= 0 || physH <= 0)
+		{
+			Console.Error.WriteLine($"[debug] Invalid physical size {physW}x{physH}; falling back to {logicalW}x{logicalH}.");
+			physW = logicalW;
+			physH = logicalH;
+		}
+
 		Console.Error.WriteLine($"[debug] dpi={dpiX} phys={physW}x{physH}");
-		SetWindowPos(hwnd, IntPtr.Zero, 0, 0, physW, physH, SWP_NOMOVE | SWP_NOZORDER);
+		try
+		{
+			if (!SetWindowPos(hwnd, IntPtr.Zero, 0, 0, physW, physH, SWP_NOMOVE | SWP_NOZORDER))
+			{
+				int error = Marshal.GetLastWin32Error();
+				Console.Error.WriteLine($"[debug] SetWindowPos failed ({error}); falling back to Photino.SetSize.");
+				window.SetSize(logicalW, logicalH);
+			}
+		}
+		catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+		{
+			Console.Error.WriteLine("[debug] SetWindowPos unavailable; falling back to Photino.SetSize: " + ex.Message);
+			window.SetSize(logicalW, logicalH);
+		}
 	}
 
 	[STAThread]
@@ -99,10 +147,24 @@ internal static class Program
 
 			window.RegisterWindowCreatedHandler((_, _) =>
 			{
-				float scale = window.ScreenDpi / 96f;
-				Console.Error.WriteLine($"[debug] ScreenDpi={window.ScreenDpi} scale={scale} size={window.Size}");
-				ApplyPhysicalSize(window, 1280, 800);
-				window.Center();
+				try
+				{
+					float screenDpi = window.ScreenDpi;
+					float scale = screenDpi > 0 ? screenDpi / 96f : 1f;
+					Console.Error.WriteLine($"[debug] ScreenDpi={screenDpi} scale={scale} size={window.Size}");
+					ApplyPhysicalSize(window, 1280, 800);
+					window.Center();
+				}
+				catch (Exception ex)
+				{
+					// DPI/positioning is cosmetic. It must never prevent the web UI from
+					// being shown on compatibility layers with partial Win32 support.
+					Console.Error.WriteLine("[warning] Window sizing failed; preserving the default Photino size: " + ex);
+					try { window.SetSize(1280, 800).Center(); } catch (Exception fallbackEx)
+					{
+						Console.Error.WriteLine("[warning] Photino fallback sizing also failed: " + fallbackEx);
+					}
+				}
 			});
 
 #if WINDOWS
