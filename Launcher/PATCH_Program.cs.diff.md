@@ -1,27 +1,20 @@
 # Patch for `Launcher/CypressLauncher/Program.cs`
 
-Two edits. Nothing else in `Program.cs` changes.
+One edit. No csproj change is required.
 
-## 1. Add Avalonia packages to `Launcher/CypressLauncher.csproj`
+## 0. Remove the previous file
 
-The file is at `Launcher/CypressLauncher.csproj` (NOT inside `CypressLauncher/`).
-Add inside the existing `<ItemGroup>` that already holds `Photino.NET`:
+Delete `Launcher/CypressLauncher/AvaloniaFallbackHost.cs` if it is present.
+It referenced the Avalonia packages, which are not in `CypressLauncher.csproj`,
+and that is what broke CI (CS0246 on `Avalonia`, `AppBuilder`, `Window`, etc.).
+`NativeFallbackHost.cs` needs no new packages: the project already sets
+`<UseWindowsForms>true</UseWindowsForms>`.
 
-```xml
-<PackageReference Include="Avalonia" Version="11.1.*" />
-<PackageReference Include="Avalonia.Desktop" Version="11.1.*" />
-<PackageReference Include="Avalonia.Themes.Fluent" Version="11.1.*" />
-<PackageReference Include="Avalonia.Fonts.Inter" Version="11.1.*" />
-```
-
-Keep `<UseWindowsForms>true</UseWindowsForms>` (tray + MessageBox on the
-normal Windows path) and keep the `net8.0-windows` target.
-
-## 2. Replace the body of `RunBrowserFallback`
+## 1. Replace the body of `RunBrowserFallback`
 
 Find:
 
-```
+```csharp
 private static void RunBrowserFallback(MessageHandler handler)
 {
     string token = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
@@ -34,85 +27,82 @@ Replace the whole method with:
 ```
 private static void RunBrowserFallback(MessageHandler handler)
 {
-    using var host = new AvaloniaFallbackHost(handler);
+    using var host = new NativeFallbackHost(handler);
     handler.SetBrowserMessageSender(host.SendToBrowser);
     handler.SetBrowserCloseAction(host.RequestShutdown);
     handler.SetBrowserExternalUrlOpener(host.OpenExternalUrl);
-    Console.Error.WriteLine("Cypress is using its GameNative/Wine native Avalonia rendering mode.");
+    Console.Error.WriteLine("Cypress is using its GameNative/Wine native GDI rendering mode.");
     host.Start(); // blocks until the window is closed
     handler.KillAllInstances();
 }
 ```
 
+## 2. Nothing else changes
+
 `ShouldUseBrowserFallback()`, `IsGameNativeSession()`,
-`ConfigureWineWebView2Compatibility()` and all `#if WINDOWS` blocks stay
-exactly as they are. `BrowserFallbackHost.cs` can stay in the tree as a manual
-WebView2 escape hatch; it is simply no longer called on the GameNative path.
+`ConfigureWineWebView2Compatibility()` and all `#if WINDOWS` blocks stay exactly
+as they are. `BrowserFallbackHost.cs` can stay in the tree as a manual WebView2
+escape hatch; it is simply no longer called on the GameNative path.
 
 </BDS:create_file>
 
-<BDS:create_file fileName="Launcher/README-GameNative-Avalonia.md">
+<BDS:create_file fileName="Launcher/README-GameNative-Native.md">
 
 ```markdown
 # Cypress - GameNative native rendering host (overlay patch)
 
 ## What this archive is
 
-This is an **overlay patch**, not a full source tree. It contains only the files
-that change on the GameNative/Wine rendering path. Copy them over an existing
+An **overlay patch**, not a full source tree. Copy over an existing
 `JebbyCodes/Cypress` checkout:
 
-Launcher/CypressLauncher/AvaloniaFallbackHost.cs   (new file)
-Launcher/PATCH_Program.cs.diff.md                  (instructions)
-Launcher/README-GameNative-Avalonia.md             (this file)
+Launcher/CypressLauncher/NativeFallbackHost.cs   (new file)
+Launcher/PATCH_Program.cs.diff.md                (instructions)
+Launcher/README-GameNative-Native.md             (this file)
 
 ```
 
-Then follow `PATCH_Program.cs.diff.md` (add 4 Avalonia packages, replace the
-body of `RunBrowserFallback`). That is the entire code change.
+Then follow `PATCH_Program.cs.diff.md`: delete `AvaloniaFallbackHost.cs` if
+present, and replace the body of `RunBrowserFallback`. That is the entire change.
+No csproj edit, no new NuGet packages.
 
-## Why
+## Fixing the CI failure
 
-The launcher serves its UI on loopback and, under Wine/GameNative, displays it
-with the downloaded `SimpleWebView2Browser.exe`. That binary is a thin WebView2
-(Chromium) host. Under Wine, Chromium's GPU process cannot present its D3D11
-shared-texture surface, which produces the white window that only partially
-repaints after a click. The loopback server, the message bridge and the HTML are
-all correct - the failure is purely the Chromium compositor present step.
+The earlier patch added `AvaloniaFallbackHost.cs` but the Avalonia packages were
+never added to `CypressLauncher.csproj`, so CI failed with CS0246 on every
+Avalonia type. `NativeFallbackHost.cs` uses `System.Windows.Forms`, which the
+project already enables (`<UseWindowsForms>true</UseWindowsForms>`, used by the
+tray icon and `MessageBox` in `Program.cs`). It compiles with the existing
+package set.
 
-`ConfigureWineWebView2Compatibility()` already sets the `win8` AppDefaults
-override, and `Program.cs` already guards DPI/`SetWindowPos`. Those are correct
-but do not fix a broken present.
+## Why WinForms and not Avalonia
 
-## Fix
-
-`AvaloniaFallbackHost.cs` replaces the WebView2 host on the Wine/GameNative path.
-It renders with Avalonia + Skia in **software** mode
-(`Win32RenderingMode.Software`), so no D3D or DirectComposition is involved. The
-existing `MessageHandler` backend is unchanged - the host only replaces the
-render and message-pump layer, using the same
-`SetBrowserMessageSender` / `HandleMessage(null, json)` /
-`SetBrowserExternalUrlOpener` contract the loopback bridge used.
+Both avoid Chromium. WinForms wins here because it needs no new dependency and
+cannot regress the build. WinForms renders through GDI/User32 and never touches
+DirectComposition or D3D, which is exactly the subsystem that fails inside
+WebView2/Chromium under Wine.
 
 ## Status (honest)
 
-- **Not compiled, not run.** There is no .NET SDK, Wine or GameNative in the
-  environment that produced this patch. Do not treat it as verified.
+- **Not compiled by me.** No .NET SDK, Wine or GameNative in this environment.
+  Do not treat it as verified. It does remove the CS0246 cause, since it
+  references only `System.Windows.Forms`/`System.Drawing`, already in the project.
 - Correct against the reviewed source (`Program.cs`, `BrowserFallbackHost.cs`,
-  `core.js`): diagnosis and bridge wiring.
-- **Reduced-scope UI.** The native window exercises the real backend (auth,
-  instances, browser list) via buttons and a raw-JSON box. It does **not**
-  reproduce every tab, the playlist builder, pickers, translations or docs
-  pages. Full UI parity requires porting `wwwroot/js/*.js` and
-  `wwwroot/css/*.css` to Avalonia views - that work is not included here.
+  `core.js`): diagnosis and bridge wiring
+  (`SetBrowserMessageSender` / `HandleMessage(null, json)` / external opener).
+- **Reduced-scope UI.** The window exercises the real backend (auth, instances,
+  browser list) through buttons and a raw-JSON box. It does not reproduce every
+  tab, the playlist builder, pickers, translations or docs pages. Full parity
+  requires porting `wwwroot/js/*.js` and `wwwroot/css/*.css`.
 - **EA OAuth not verified.** `EaLoginWindow.cs` was not reviewed. On GameNative
   `OpenExternalUrl` routes to the Android browser; confirm the redirect returns
-  into the app on a real device.
+  into the app on real hardware.
+- Only `checkAuth` is confirmed from `core.js`; the other button action strings
+  are illustrative and should be corrected against `MessageHandler.*.cs`.
 
 ## Remaining work
 
-1. Port the full HTML UI to Avalonia for complete feature parity.
-2. Confirm every backend action string against `MessageHandler.*.cs` (only
-   `checkAuth` is confirmed from `core.js`; the other buttons are illustrative).
+1. Port the full HTML UI for complete feature parity.
+2. Confirm every backend action string.
 3. Verify EA OAuth round-trip on GameNative hardware.
 4. Windows 11 regression run.
