@@ -209,7 +209,7 @@ internal sealed class NativeFallbackHost : IDisposable
 				WrapContents = false
 			};
 			buttons.Controls.Add(MakeButton("Check Auth", "{\"type\":\"checkAuth\"}"));
-			buttons.Controls.Add(MakeButton("EA Login", "{\"type\":\"startEALogin\"}"));
+			buttons.Controls.Add(MakeButton("EA Login", "{\"type\":\"eaLogin\"}"));
 			buttons.Controls.Add(MakeButton("Instances", "{\"type\":\"getInstances\"}"));
 			buttons.Controls.Add(MakeButton("Browser List", "{\"type\":\"getBrowserList\"}"));
 			buttons.Controls.Add(MakeButton("Quit", null));
