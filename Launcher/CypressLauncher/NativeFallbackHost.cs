@@ -84,11 +84,14 @@ internal sealed class NativeFallbackHost : IDisposable
 			if (!form.IsDisposed)
 				form.BeginInvoke((Action)(() => { try { form.Close(); } catch { } }));
 		}
+		catch (ObjectDisposedException)
+		{
+			// Form already destroyed; nothing to close.
+		}
 		catch (InvalidOperationException)
 		{
-			// Handle not created yet or already destroyed; nothing to close.
+			// Handle not created yet; nothing to close.
 		}
-		catch (ObjectDisposedException) { }
 	}
 
 	// Backend -> UI. Called from arbitrary backend threads.
@@ -109,8 +112,8 @@ internal sealed class NativeFallbackHost : IDisposable
 				catch (Exception ex) { Console.Error.WriteLine("[Cypress] UI delivery failed: " + ex.Message); }
 			}));
 		}
-		catch (InvalidOperationException) { }
 		catch (ObjectDisposedException) { }
+		catch (InvalidOperationException) { }
 	}
 
 	// UI -> external browser. Under GameNative the Wine shell routes this to the
