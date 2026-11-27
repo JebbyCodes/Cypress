@@ -79,8 +79,12 @@ internal static class ResourceBuilder
 
 		if (!string.IsNullOrWhiteSpace(browserBridgeToken))
 		{
+			// The normal Photino page hides its body until its first translations
+			// message. In browser mode that message arrives asynchronously over the
+			// HTTP bridge, so force the UI visible and expose bridge status instead.
+			string browserStyle = "<style>html,body{visibility:visible!important}</style>";
 			string bridgeScript = BuildBrowserBridgeScript(browserBridgeToken);
-			html = html.Replace("</head>", bridgeScript + "\n</head>", StringComparison.OrdinalIgnoreCase);
+			html = html.Replace("</head>", browserStyle + "\n" + bridgeScript + "\n</head>", StringComparison.OrdinalIgnoreCase);
 		}
 
 		return html;
@@ -88,16 +92,54 @@ internal static class ResourceBuilder
 
 	private static string BuildBrowserBridgeScript(string token)
 	{
-		// Use a non-interpolated raw string so JavaScript object/function braces are
-		// preserved literally. Only the unique token placeholder is substituted.
+		// Keep this script self-contained: SimpleWebView2Browser loads the UI
+		// over loopback, not through Photino's native window.message API.
 		const string tokenPlaceholder = "__CYPRESS_BROWSER_BRIDGE_TOKEN__";
 		string script = """
 <script>
 (() => {
-    const apiRoot = '/__CYPRESS_BROWSER_BRIDGE_TOKEN__/api/';
+    const apiRoot = new URL('/__CYPRESS_BROWSER_BRIDGE_TOKEN__/api/', window.location.origin).toString();
     let receiveCallback = null;
     let cursor = 0;
     let polling = false;
+    let statusElement = null;
+
+    function setBridgeStatus(text, connected) {
+        if (statusElement) {
+            statusElement.textContent = text;
+            statusElement.style.background = connected ? '#3c3836' : '#7c2d12';
+        }
+    }
+
+    const addFallbackNotice = () => {
+        if (document.getElementById('cypressBrowserNotice')) return;
+        const notice = document.createElement('div');
+        notice.id = 'cypressBrowserNotice';
+        notice.style.cssText = 'position:fixed;top:8px;right:8px;z-index:2147483647;display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:8px;background:#282828;color:#ebdbb2;font:12px system-ui;box-shadow:0 2px 12px #0008;';
+        const label = document.createElement('span');
+        label.textContent = 'Cypress';
+        statusElement = document.createElement('span');
+        statusElement.textContent = 'Connecting…';
+        statusElement.style.cssText = 'padding:3px 6px;border-radius:5px;background:#7c2d12;color:#fff;';
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Exit';
+        close.style.cssText = 'border:0;border-radius:5px;padding:5px 8px;background:#d65d0e;color:#fff;font:600 12px system-ui;cursor:pointer;';
+        close.addEventListener('click', () => window.cypressBridge.sendMessage(JSON.stringify({ type: 'windowClose' })));
+        notice.append(label, statusElement, close);
+        document.body.appendChild(notice);
+    };
+
+    async function probeServer() {
+        try {
+            const response = await fetch(apiRoot + 'health', { cache: 'no-store' });
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            setBridgeStatus('Connected', true);
+        } catch (error) {
+            setBridgeStatus('Reconnecting…', false);
+            console.error('Cypress local server is not reachable.', error);
+        }
+    }
 
     async function pollMessages() {
         if (polling) return;
@@ -107,11 +149,13 @@ internal static class ResourceBuilder
                 const response = await fetch(apiRoot + 'poll?after=' + cursor, { cache: 'no-store' });
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 const messages = await response.json();
+                setBridgeStatus('Connected', true);
                 for (const item of messages) {
                     cursor = Math.max(cursor, Number(item.id) || cursor);
                     receiveCallback(item.message);
                 }
             } catch (error) {
+                setBridgeStatus('Reconnecting…', false);
                 console.warn('Cypress browser bridge disconnected; retrying.', error);
                 await new Promise(resolve => setTimeout(resolve, 1200));
             }
@@ -125,7 +169,13 @@ internal static class ResourceBuilder
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json; charset=utf-8' },
                 body: String(message)
-            }).catch(error => console.error('Cypress message could not be delivered.', error));
+            }).then(response => {
+                if (!response.ok) throw new Error('HTTP ' + response.status);
+                setBridgeStatus('Connected', true);
+            }).catch(error => {
+                setBridgeStatus('Reconnecting…', false);
+                console.error('Cypress message could not be delivered.', error);
+            });
         },
         receiveMessage(callback) {
             receiveCallback = callback;
@@ -133,23 +183,12 @@ internal static class ResourceBuilder
         }
     };
 
-    // Give users a clear way to close the background launcher process when
-    // running in browser-hosted compatibility mode.
-    const addFallbackNotice = () => {
-        const notice = document.createElement('div');
-        notice.style.cssText = 'position:fixed;top:8px;right:8px;z-index:2147483647;display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:8px;background:#282828;color:#ebdbb2;font:12px system-ui;box-shadow:0 2px 12px #0008;';
-        const label = document.createElement('span');
-        label.textContent = 'Cypress browser compatibility mode';
-        const close = document.createElement('button');
-        close.type = 'button';
-        close.textContent = 'Exit Cypress';
-        close.style.cssText = 'border:0;border-radius:5px;padding:5px 8px;background:#d65d0e;color:#fff;font:600 12px system-ui;cursor:pointer;';
-        close.addEventListener('click', () => window.cypressBridge.sendMessage(JSON.stringify({ type: 'windowClose' })));
-        notice.append(label, close);
-        document.body.appendChild(notice);
-    };
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', addFallbackNotice, { once: true });
-    else addFallbackNotice();
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => { addFallbackNotice(); probeServer(); }, { once: true });
+    } else {
+        addFallbackNotice();
+        probeServer();
+    }
 })();
 </script>
 """;

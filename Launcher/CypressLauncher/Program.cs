@@ -4,6 +4,7 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using Microsoft.Win32;
 using Photino.NET;
 
 namespace CypressLauncher;
@@ -126,6 +127,7 @@ internal static class Program
 			if (ShouldUseBrowserFallback())
 			{
 				IsBrowserFallback = true;
+				ConfigureWineWebView2Compatibility();
 				RunBrowserFallback(handler);
 				handler.KillAllInstances();
 				return;
@@ -213,16 +215,8 @@ internal static class Program
 		}
 	}
 
-	private static bool ShouldUseBrowserFallback()
+	private static bool IsRunningUnderWine()
 	{
-		string? configured = Environment.GetEnvironmentVariable("CYPRESS_BROWSER_MODE");
-		if (configured == "1" || string.Equals(configured, "true", StringComparison.OrdinalIgnoreCase))
-			return true;
-		if (configured == "0" || string.Equals(configured, "false", StringComparison.OrdinalIgnoreCase))
-			return false;
-
-		// Wine exports wine_get_version from ntdll. Its presence is a reliable
-		// indicator that the Windows build is running through Wine/Proton.
 		try
 		{
 			IntPtr ntdll = GetModuleHandle("ntdll.dll");
@@ -231,34 +225,83 @@ internal static class Program
 		catch { return false; }
 	}
 
+	private static bool IsGameNativeSession()
+	{
+		// GameNative sets these variables before launching Windows programs so
+		// Wine routes shell-opened URLs back to Android. Detect them as an explicit
+		// signal as well as checking Wine's ntdll export.
+		foreach (string name in new[] { "WINE_OPEN_WITH_ANDROID_BROWSER", "WINE_OPEN_WITH_ANDROID_BROwSER" })
+		{
+			string? value = Environment.GetEnvironmentVariable(name);
+			if (value == "1" || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase))
+				return true;
+		}
+		return false;
+	}
+
+	private static bool ShouldUseBrowserFallback()
+	{
+		string? configured = Environment.GetEnvironmentVariable("CYPRESS_BROWSER_MODE");
+		if (configured == "1" || string.Equals(configured, "true", StringComparison.OrdinalIgnoreCase))
+			return true;
+		if (configured == "0" || string.Equals(configured, "false", StringComparison.OrdinalIgnoreCase))
+			return false;
+
+		// Wine/Proton can fail to paint Photino's embedded WebView2 window.
+		// GameNative is also detected by its Android URL-routing environment flag.
+		return IsRunningUnderWine() || IsGameNativeSession();
+	}
+
+	private static void ConfigureWineWebView2Compatibility()
+	{
+#if WINDOWS
+		if (!IsRunningUnderWine() && !IsGameNativeSession()) return;
+		try
+		{
+			// Wine currently fails WebView2's DirectComposition initialisation when
+			// msedgewebview2.exe reports Windows 8.1 or newer. Its per-application
+			// compatibility override set to win8 is the documented workaround.
+			using RegistryKey? key = Registry.CurrentUser.CreateSubKey(
+				@"Software\Wine\AppDefaults\msedgewebview2.exe");
+			if (key == null)
+				throw new InvalidOperationException("Wine WebView2 compatibility registry key could not be created.");
+			key.SetValue("Version", "win8", RegistryValueKind.String);
+			key.Flush();
+			Console.Error.WriteLine("[Cypress] Applied the Wine WebView2 win8 compatibility override.");
+		}
+		catch (Exception ex)
+		{
+			Console.Error.WriteLine("[Cypress] Could not apply the Wine WebView2 compatibility override: " + ex.Message);
+		}
+#endif
+	}
+
 	private static void RunBrowserFallback(MessageHandler handler)
 	{
 		string token = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
 		string html = ResourceBuilder.BuildHtml(Assembly.GetExecutingAssembly(), token);
 		using var browser = new BrowserFallbackHost(handler, html, token);
 		handler.SetBrowserMessageSender(browser.SendToBrowser);
+		handler.SetBrowserCloseAction(browser.RequestShutdown);
+		handler.SetBrowserExternalUrlOpener(browser.OpenExternalUrl);
 		string url = browser.Start();
 
-		string? infoPath = null;
+		Console.Error.WriteLine("Cypress is using its GameNative/Wine browser compatibility mode.");
+		Console.Error.WriteLine("Starting the bundled SimpleWebView2Browser for the local Cypress UI.");
+		Console.Error.WriteLine("Browser fallback diagnostics: " + Path.Combine(
+			Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Cypress", "browser-fallback.log"));
+		Console.Error.WriteLine("Local Cypress UI: " + url);
+
 		try
 		{
-			string appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Cypress");
-			Directory.CreateDirectory(appData);
-			infoPath = Path.Combine(appData, "browser-fallback-url.txt");
-			File.WriteAllText(infoPath,
-				"Cypress is using its external-browser compatibility mode because it detected Wine/Proton.\r\n\r\n" +
-				"Open this address in the device browser while Cypress is running:\r\n" + url + "\r\n\r\n" +
-				"The address is local to this device and contains a temporary access token. Do not share it.");
+			browser.TryOpenBrowser();
+			browser.WaitForShutdown();
 		}
-		catch { }
-
-		Console.Error.WriteLine("Cypress detected Wine/Proton and skipped Photino/WebView2.");
-		Console.Error.WriteLine("Open the Cypress UI in the device browser: " + url);
-		if (infoPath != null)
-			Console.Error.WriteLine("Browser URL saved to: " + infoPath);
-
-		browser.TryOpenBrowser();
-		browser.WaitForShutdown();
+		catch (Exception ex)
+		{
+			Console.Error.WriteLine("[Cypress] Could not start the local WebView browser: " + ex);
+			throw;
+		}
 	}
 
 #if WINDOWS

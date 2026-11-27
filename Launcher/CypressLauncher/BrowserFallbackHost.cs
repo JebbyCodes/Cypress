@@ -1,10 +1,14 @@
 #nullable enable
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO.Compression;
+using System.Net.Http;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,14 +18,18 @@ namespace CypressLauncher;
 
 /// <summary>
 /// Hosts the launcher's HTML UI on loopback and bridges browser messages to the
-/// existing MessageHandler. This avoids the Windows WebView2 dependency in Wine /
-/// Proton environments where the embedded browser cannot be started.
+/// existing MessageHandler. Wine/Proton uses a standalone WebView2 host because
+/// Photino's embedded browser window may fail to render in that environment.
 /// </summary>
 internal sealed class BrowserFallbackHost : IDisposable
 {
 	private const int MaxHeaderBytes = 64 * 1024;
 	private const int MaxBodyBytes = 2 * 1024 * 1024;
+	private const string BrowserDownloadUrl = "https://github.com/felixhaedicke/SimpleWebView2Browser/releases/download/v0.1/SimpleWebView2Browser.zip";
+	private const string BrowserDownloadSha256 = "a8bd3c3a609e68434deb06216cee5a434048a7f3e97c5a9cf7411bf867ab11c1";
 	private static readonly byte[] s_headerTerminator = { 13, 10, 13, 10 };
+	private static readonly HttpClient s_downloadClient = new() { Timeout = TimeSpan.FromSeconds(45) };
+	private static readonly object s_downloadLock = new();
 
 	private readonly TcpListener m_listener;
 	private readonly CancellationTokenSource m_shutdown = new();
@@ -34,6 +42,10 @@ internal sealed class BrowserFallbackHost : IDisposable
 	private TaskCompletionSource<bool> m_messageSignal = NewSignal();
 	private long m_nextMessageId;
 	private Task? m_acceptTask;
+	private Process? m_browserProcess;
+	private readonly List<Process> m_externalBrowserProcesses = new();
+	private int m_shutdownRequested;
+	private readonly object m_lifecycleLock = new();
 
 	private sealed record OutboundMessage(long Id, string Message);
 	private sealed record HttpRequest(string Method, string Target, string Path, string Query, byte[] Body);
@@ -53,6 +65,7 @@ internal sealed class BrowserFallbackHost : IDisposable
 		m_listener.Start();
 		int port = ((IPEndPoint)m_listener.LocalEndpoint).Port;
 		Url = $"http://127.0.0.1:{port}/{m_token}/";
+		Log($"Loopback server is listening on 127.0.0.1:{port}; waiting for the SimpleWebView2Browser page request.");
 		m_acceptTask = AcceptLoopAsync(m_shutdown.Token);
 		return Url;
 	}
@@ -73,21 +86,253 @@ internal sealed class BrowserFallbackHost : IDisposable
 
 	public void TryOpenBrowser()
 	{
+		Process process = StartBrowserProcess(Url);
+		lock (m_lifecycleLock)
+			m_browserProcess = process;
+		Log("Started SimpleWebView2Browser for the Cypress loopback URL; process id=" + process.Id + ".");
+		_ = MonitorBrowserExitAsync(process);
+	}
+
+	public void OpenExternalUrl(string url)
+	{
+		if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? uri) ||
+			(uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+			throw new ArgumentException("Only absolute HTTP and HTTPS URLs can be opened.", nameof(url));
+
+		Process process = StartBrowserProcess(uri.AbsoluteUri);
+		lock (m_lifecycleLock)
+		{
+			if (Volatile.Read(ref m_shutdownRequested) != 0)
+			{
+				try { process.Kill(entireProcessTree: true); } catch { }
+				process.Dispose();
+				throw new ObjectDisposedException(nameof(BrowserFallbackHost));
+			}
+			m_externalBrowserProcesses.Add(process);
+		}
+		Log("Opened an external HTTP(S) link in a second SimpleWebView2Browser window.");
+		_ = MonitorExternalBrowserExitAsync(process);
+	}
+
+	private static Process StartBrowserProcess(string targetUrl)
+	{
+		string browserPath = ResolveConfiguredBrowser() ?? DownloadBrowser();
+		var startInfo = new ProcessStartInfo
+		{
+			FileName = browserPath,
+			UseShellExecute = false,
+			WorkingDirectory = Path.GetDirectoryName(browserPath) ?? AppContext.BaseDirectory,
+			WindowStyle = ProcessWindowStyle.Normal
+		};
+		// SimpleWebView2Browser reads argv[1] as its initial navigation URL.
+		startInfo.ArgumentList.Add(targetUrl);
+		return Process.Start(startInfo)
+			?? throw new InvalidOperationException("SimpleWebView2Browser did not start.");
+	}
+
+	private async Task MonitorBrowserExitAsync(Process process)
+	{
 		try
 		{
-			var startInfo = new System.Diagnostics.ProcessStartInfo
-			{
-				FileName = Url,
-				UseShellExecute = true
-			};
-			System.Diagnostics.Process.Start(startInfo);
-			Log("Requested the system browser to open the launcher URL.");
+			await process.WaitForExitAsync().ConfigureAwait(false);
+			Log("SimpleWebView2Browser exited with code " + process.ExitCode + ".");
+			if (!m_shutdown.IsCancellationRequested)
+				RequestShutdown();
+		}
+		catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
+		{
+			Log("Could not monitor the browser process: " + ex.Message);
+		}
+	}
+
+	private async Task MonitorExternalBrowserExitAsync(Process process)
+	{
+		try { await process.WaitForExitAsync().ConfigureAwait(false); }
+		catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
+		{
+			Log("Could not monitor an external browser window: " + ex.Message);
+		}
+		finally
+		{
+			lock (m_lifecycleLock) m_externalBrowserProcesses.Remove(process);
+			try { process.Dispose(); } catch { }
+		}
+	}
+
+	public void RequestShutdown()
+	{
+		if (Interlocked.Exchange(ref m_shutdownRequested, 1) != 0) return;
+		try { m_shutdown.Cancel(); } catch (ObjectDisposedException) { }
+		try { m_listener.Stop(); } catch { }
+
+		Process? mainProcess;
+		Process[] externalProcesses;
+		lock (m_lifecycleLock)
+		{
+			mainProcess = m_browserProcess;
+			externalProcesses = m_externalBrowserProcesses.ToArray();
+			m_externalBrowserProcesses.Clear();
+		}
+
+		CloseBrowserProcess(mainProcess, "main");
+		foreach (Process process in externalProcesses)
+			CloseBrowserProcess(process, "external");
+	}
+
+	private static void CloseBrowserProcess(Process? process, string label)
+	{
+		if (process == null) return;
+		try
+		{
+			if (process.HasExited) return;
+			try { process.CloseMainWindow(); } catch { }
+			if (!process.WaitForExit(1500) && !process.HasExited)
+				process.Kill(entireProcessTree: true);
 		}
 		catch (Exception ex)
 		{
-			Log("Could not open the system browser automatically: " + ex.Message);
-			Log("Open this URL manually in the device browser: " + Url);
+			Log("Could not close " + label + " SimpleWebView2Browser window: " + ex.Message);
 		}
+	}
+
+	private static string? ResolveConfiguredBrowser()
+	{
+		// An explicit override is useful for development, but normal users never
+		// need to configure a browser path. The release build bundles the browser.
+		string? configured = Environment.GetEnvironmentVariable("CYPRESS_BROWSER_EXECUTABLE");
+		if (!string.IsNullOrWhiteSpace(configured))
+		{
+			string? resolved = ResolveBrowserPath(configured);
+			if (resolved != null) return resolved;
+			Log("CYPRESS_BROWSER_EXECUTABLE was not found: " + configured);
+		}
+
+		string bundledBrowser = Path.Combine(AppContext.BaseDirectory, "Browser", "SimpleWebView2Browser.exe");
+		if (IsCompleteBrowserInstall(bundledBrowser)) return Path.GetFullPath(bundledBrowser);
+
+		// Keep compatibility with older development builds that placed the files
+		// directly beside CypressLauncher.exe.
+		string besideLauncher = Path.Combine(AppContext.BaseDirectory, "SimpleWebView2Browser.exe");
+		if (IsCompleteBrowserInstall(besideLauncher)) return Path.GetFullPath(besideLauncher);
+
+		string appDataBrowser = Path.Combine(
+			Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+			"Cypress", "Browser", "SimpleWebView2Browser.exe");
+		if (IsCompleteBrowserInstall(appDataBrowser)) return Path.GetFullPath(appDataBrowser);
+
+		// Preserve support for a developer-managed portable browser.
+		string configPath = Path.Combine(
+			Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+			"Cypress", "browser-executable.txt");
+		try
+		{
+			if (File.Exists(configPath))
+			{
+				foreach (string rawLine in File.ReadAllLines(configPath))
+				{
+					string line = rawLine.Trim();
+					if (line.Length == 0 || line.StartsWith("#", StringComparison.Ordinal)) continue;
+					string? resolved = ResolveBrowserPath(line);
+					if (resolved != null) return resolved;
+					Log("Browser path in " + configPath + " was not found: " + line);
+				}
+			}
+		}
+		catch (Exception ex) { Log("Could not read browser configuration: " + ex.Message); }
+
+		string? pathValue = Environment.GetEnvironmentVariable("PATH");
+		if (!string.IsNullOrWhiteSpace(pathValue))
+		{
+			foreach (string directory in pathValue.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+			{
+				try
+				{
+					string candidate = Path.Combine(directory.Trim().Trim('"'), "SimpleWebView2Browser.exe");
+					if (IsCompleteBrowserInstall(candidate)) return Path.GetFullPath(candidate);
+				}
+				catch { }
+			}
+		}
+		return null;
+	}
+
+	private static string? ResolveBrowserPath(string value)
+	{
+		string candidate = Environment.ExpandEnvironmentVariables(value.Trim().Trim('"'));
+		if (candidate.Length == 0) return null;
+		try
+		{
+			if (IsCompleteBrowserInstall(candidate)) return Path.GetFullPath(candidate);
+			if (!Path.IsPathRooted(candidate))
+			{
+				string besideLauncher = Path.Combine(AppContext.BaseDirectory, candidate);
+				if (IsCompleteBrowserInstall(besideLauncher)) return Path.GetFullPath(besideLauncher);
+			}
+		}
+		catch { }
+		return null;
+	}
+
+	private static bool IsCompleteBrowserInstall(string executablePath)
+	{
+		try
+		{
+			return File.Exists(executablePath) &&
+				File.Exists(Path.Combine(Path.GetDirectoryName(executablePath) ?? string.Empty, "WebView2Loader.dll"));
+		}
+		catch { return false; }
+	}
+
+	private static string DownloadBrowser()
+	{
+		lock (s_downloadLock)
+		{
+			string browserDirectory = Path.Combine(
+				Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+				"Cypress", "Browser");
+			Directory.CreateDirectory(browserDirectory);
+			string executablePath = Path.Combine(browserDirectory, "SimpleWebView2Browser.exe");
+			string loaderPath = Path.Combine(browserDirectory, "WebView2Loader.dll");
+			if (IsCompleteBrowserInstall(executablePath))
+				return executablePath;
+
+			Log("Bundled browser is missing; downloading the pinned SimpleWebView2Browser v0.1 release.");
+			byte[] archiveBytes = s_downloadClient.GetByteArrayAsync(BrowserDownloadUrl).GetAwaiter().GetResult();
+			string actualHash = Convert.ToHexString(SHA256.HashData(archiveBytes)).ToLowerInvariant();
+			if (!actualHash.Equals(BrowserDownloadSha256, StringComparison.OrdinalIgnoreCase))
+				throw new InvalidDataException("SimpleWebView2Browser download failed SHA-256 verification.");
+
+			using var archiveStream = new MemoryStream(archiveBytes, writable: false);
+			using var archive = new ZipArchive(archiveStream, ZipArchiveMode.Read);
+			ZipArchiveEntry? executableEntry = archive.Entries.FirstOrDefault(e => e.Name.Equals("SimpleWebView2Browser.exe", StringComparison.OrdinalIgnoreCase));
+			ZipArchiveEntry? loaderEntry = archive.Entries.FirstOrDefault(e => e.Name.Equals("WebView2Loader.dll", StringComparison.OrdinalIgnoreCase));
+			if (executableEntry == null || loaderEntry == null)
+				throw new InvalidDataException("The downloaded browser archive is missing its executable or WebView2Loader.dll.");
+
+			string tempExecutable = executablePath + ".new";
+			string tempLoader = loaderPath + ".new";
+			try
+			{
+				CopyArchiveEntry(executableEntry, tempExecutable);
+				CopyArchiveEntry(loaderEntry, tempLoader);
+				File.Move(tempExecutable, executablePath, overwrite: true);
+				File.Move(tempLoader, loaderPath, overwrite: true);
+			}
+			finally
+			{
+				try { File.Delete(tempExecutable); } catch { }
+				try { File.Delete(tempLoader); } catch { }
+			}
+			Log("Downloaded and verified SimpleWebView2Browser into the Cypress application data directory.");
+			return executablePath;
+		}
+	}
+
+	private static void CopyArchiveEntry(ZipArchiveEntry entry, string destination)
+	{
+		using Stream source = entry.Open();
+		using FileStream target = new(destination, FileMode.Create, FileAccess.Write, FileShare.None);
+		source.CopyTo(target);
 	}
 
 	public void WaitForShutdown()
@@ -130,9 +375,16 @@ internal sealed class BrowserFallbackHost : IDisposable
 				if (request == null) return;
 
 				string prefix = "/" + m_token;
-				if (request.Path == prefix + "/" && request.Method == "GET")
+				string safePath = request.Path.StartsWith(prefix, StringComparison.Ordinal)
+					? request.Path.Substring(prefix.Length)
+					: "<outside-token-path>";
+				Log("HTTP " + request.Method + " " + safePath);
+
+				if ((request.Path == prefix || request.Path == prefix + "/") && request.Method == "GET")
 				{
-					await WriteResponseAsync(stream, 200, "text/html; charset=utf-8", Encoding.UTF8.GetBytes(m_html), cancellationToken).ConfigureAwait(false);
+					byte[] htmlBytes = Encoding.UTF8.GetBytes(m_html);
+					Log($"Served the Cypress UI document ({htmlBytes.Length:N0} bytes) to SimpleWebView2Browser.");
+					await WriteResponseAsync(stream, 200, "text/html; charset=utf-8", htmlBytes, cancellationToken).ConfigureAwait(false);
 					return;
 				}
 
@@ -334,9 +586,13 @@ internal sealed class BrowserFallbackHost : IDisposable
 
 	public void Dispose()
 	{
-		m_shutdown.Cancel();
-		try { m_listener.Stop(); } catch { }
+		RequestShutdown();
 		try { m_acceptTask?.Wait(TimeSpan.FromSeconds(1)); } catch { }
+		lock (m_lifecycleLock)
+		{
+			try { m_browserProcess?.Dispose(); } catch { }
+			m_browserProcess = null;
+		}
 		m_shutdown.Dispose();
 	}
 }

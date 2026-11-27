@@ -91,3 +91,7 @@ cypress_GW1.lib
 cypress_GW2.lib
 cypress_BFN.lib
 Server/CMakeSettings.json
+
+# Downloaded build-time GameNative WebView compatibility host
+/Launcher/SimpleWebView2Browser.exe
+/Launcher/WebView2Loader.dll

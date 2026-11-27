@@ -155,6 +155,12 @@ public partial class MessageHandler
 
 		try
 		{
+			if (Program.IsBrowserFallback && m_browserExternalUrlOpener != null)
+			{
+				m_browserExternalUrlOpener(uri.AbsoluteUri);
+				return;
+			}
+
 			System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
 			{
 				FileName = uri.AbsoluteUri,

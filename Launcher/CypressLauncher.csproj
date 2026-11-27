@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <AssemblyName>CypressLauncher</AssemblyName>
     <OutputType>WinExe</OutputType>
@@ -32,6 +32,21 @@
     </Content>
     <Content Include="courgette.exe" Condition="Exists('courgette.exe')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="SimpleWebView2Browser.exe" Condition="'$(TargetFramework)' == 'net8.0-windows'">
+      <Link>Browser/SimpleWebView2Browser.exe</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="WebView2Loader.dll" Condition="'$(TargetFramework)' == 'net8.0-windows'">
+      <Link>Browser/WebView2Loader.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="ThirdParty/SimpleWebView2Browser-LICENSE.txt" Condition="'$(TargetFramework)' == 'net8.0-windows'">
+      <Link>Browser/SimpleWebView2Browser-LICENSE.txt</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
     <Content Include="GW2.patch" Condition="Exists('GW2.patch')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -86,6 +101,11 @@
     <EmbeddedResource Remove="CypressLauncher.Properties.Resources.resx" />
     <EmbeddedResource Remove="CypressLauncher\LaunchWindow.resx" />
   </ItemGroup>
+  <Target Name="EnsureSimpleWebView2Browser" BeforeTargets="PrepareForBuild"
+          Condition="'$(TargetFramework)' == 'net8.0-windows' and (!Exists('$(MSBuildProjectDirectory)/SimpleWebView2Browser.exe') or !Exists('$(MSBuildProjectDirectory)/WebView2Loader.dll'))">
+    <Message Importance="high" Text="Preparing the bundled SimpleWebView2Browser compatibility host..." />
+    <Exec Command="pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)/DownloadSimpleWebView2Browser.ps1&quot;" />
+  </Target>
   <Target Name="PruneWebView2WpfArtifacts" AfterTargets="Build;Publish" Condition="'$(TargetFramework)' == 'net8.0-windows'">
     <Delete Files="$(OutputPath)Microsoft.Web.WebView2.Wpf.dll;$(OutputPath)Microsoft.Web.WebView2.Wpf.xml" />
     <Delete Files="$(PublishDir)Microsoft.Web.WebView2.Wpf.dll;$(PublishDir)Microsoft.Web.WebView2.Wpf.xml" Condition="'$(PublishDir)' != ''" />
