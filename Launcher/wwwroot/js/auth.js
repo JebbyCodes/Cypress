@@ -10,9 +10,11 @@ function updateProfileIdentitySection() {
     var signedInBlock = document.getElementById('profileSignedInBlock');
     var usernameField = document.getElementById('username');
     var usernameHint = document.getElementById('usernameHint');
+    var sidebarLoginButton = document.getElementById('sidebarEaLoginBtn');
 
     if (signedOutBlock) signedOutBlock.style.display = loggedIn ? 'none' : '';
     if (signedInBlock) signedInBlock.style.display = loggedIn ? '' : 'none';
+    if (sidebarLoginButton) sidebarLoginButton.hidden = loggedIn;
 
     if (usernameField) {
         if (loggedIn) {

@@ -94,9 +94,8 @@ body {
     font-family: var(--font);
     background: var(--bg-dark);
     color: var(--text-primary);
-    font-size: 15px;
+    font-size: 16.5px;
     line-height: 1.6;
     letter-spacing: 0.3px;
     -webkit-font-smoothing: antialiased;
-    zoom: 1.1;
 }

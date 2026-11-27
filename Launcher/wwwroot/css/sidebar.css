@@ -104,6 +104,50 @@
     background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.15), transparent 50%);
     pointer-events: none;
 }
+.sidebar-ea-login-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    margin: 6px 12px 12px;
+    padding: 9px 12px;
+    border: 1px solid rgba(var(--accent-rgb), 0.35);
+    border-radius: var(--radius);
+    background: var(--btn-primary-bg);
+    color: var(--text-on-accent);
+    font-family: var(--font);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background var(--transition), border-color var(--transition), transform var(--transition), box-shadow var(--transition);
+    box-shadow: 0 3px 12px rgba(var(--accent-rgb), 0.12);
+}
+.sidebar-ea-login-btn svg {
+    flex-shrink: 0;
+}
+.sidebar-ea-login-btn:hover {
+    background: var(--btn-primary-hover);
+    border-color: var(--accent);
+    transform: translateY(-1px);
+    box-shadow: 0 5px 16px rgba(var(--accent-rgb), 0.2);
+}
+.sidebar-ea-login-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+.sidebar-ea-login-btn[hidden] {
+    display: none !important;
+}
+.sidebar.collapsed .sidebar-ea-login-btn {
+    margin: 6px 6px 12px;
+    padding: 10px;
+    gap: 0;
+}
+.sidebar.collapsed .sidebar-ea-login-btn span {
+    display: none;
+}
 .sidebar-header {
     padding: 24px 20px 20px;
     text-align: center;

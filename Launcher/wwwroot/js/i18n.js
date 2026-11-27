@@ -8,9 +8,39 @@
 window._i18nStrings = {};
 window._i18nLangMeta = {};
 
+function resolveTranslation(key) {
+    var raw = key == null ? '' : String(key).trim();
+    if (!raw) return '';
+
+    var strings = window._i18nStrings || {};
+    var candidates = [raw, raw.toLowerCase()];
+
+    // Older UI surfaces can supply identifiers such as
+    // JOIN.SERVER_ADDRESS_LABEL while the bundled catalog uses
+    // join.server_address_label. Try the normalized form before falling back.
+    var normalized = raw.replace(/\s+/g, '_').toLowerCase();
+    if (candidates.indexOf(normalized) === -1) candidates.push(normalized);
+
+    for (var i = 0; i < candidates.length; i++) {
+        var candidate = candidates[i];
+        if (Object.prototype.hasOwnProperty.call(strings, candidate) && typeof strings[candidate] === 'string') {
+            return strings[candidate];
+        }
+    }
+
+    // A missing translation should still be readable; never expose the raw
+    // localization token to the player.
+    var label = raw.split(/[.:/]/).filter(Boolean).pop() || raw;
+    label = label
+        .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+        .replace(/[_-]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    return label.toLowerCase().replace(/\b[a-z]/g, function(letter) { return letter.toUpperCase(); });
+}
+
 window.t = function(key, vars) {
-    var str = window._i18nStrings[key];
-    if (str === undefined) return key;
+    var str = resolveTranslation(key);
     if (vars) {
         str = str.replace(/\{(\w+)\}/g, function(_, k) {
             return vars[k] !== undefined ? String(vars[k]) : '{' + k + '}';
@@ -83,26 +113,20 @@ function applyDomTranslations() {
     document.body.style.visibility = '';
     document.querySelectorAll('[data-i18n]').forEach(function(el) {
         var key = el.getAttribute('data-i18n');
-        var val = window._i18nStrings[key];
-        if (val !== undefined) {
-            el.textContent = val;
-            el.dir = 'auto';
-        }
+        el.textContent = t(key);
+        el.dir = 'auto';
     });
     document.querySelectorAll('[data-i18n-placeholder]').forEach(function(el) {
         var key = el.getAttribute('data-i18n-placeholder');
-        var val = window._i18nStrings[key];
-        if (val !== undefined) el.placeholder = val;
+        el.placeholder = t(key);
     });
     document.querySelectorAll('[data-i18n-title]').forEach(function(el) {
         var key = el.getAttribute('data-i18n-title');
-        var val = window._i18nStrings[key];
-        if (val !== undefined) el.title = val;
+        el.title = t(key);
     });
     document.querySelectorAll('[data-i18n-tip]').forEach(function(el) {
         var key = el.getAttribute('data-i18n-tip');
-        var val = window._i18nStrings[key];
-        if (val !== undefined) el.setAttribute('data-tip', val);
+        el.setAttribute('data-tip', t(key));
     });
 
     // rerender picker uis whose option elements carry data-i18n translations,

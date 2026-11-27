@@ -1,51 +1,32 @@
-# Cypress fixes round 3
+# Cypress UI fixes
 
-## 1. Game images enlarged
+This source snapshot includes a set of fixes for the launcher UI:
 
-My previous `content.css` was truncated at `/* ... rest of content.css unchanged ... */`.
-That deleted `.game-info-panel`, `.game-info-bg`, `.game-info-icon`,
-`.game-info-overlay`, and every `.changed-settings-*` rule, so the game `<img>`
-elements rendered at natural size. The full file is restored in this archive and
-only two properties were added (`min-height: 0`).
+## Right-hand content scrollbar
 
-**Apply:** replace `Launcher/wwwroot/css/content.css` with this one.
+- The main content pane uses a dedicated vertical scroll container and reserves a visible scrollbar rail.
+- The scrollbar thumb has a stronger contrast in both Chromium/WebView2 and Firefox-style rendering.
+- The active tab is allowed to grow with its content instead of being compressed into the available viewport height.
+- The app uses the dynamic viewport height where supported, with the regular viewport-height declaration as a fallback.
+- The page-wide `zoom` setting has been removed because it scaled the viewport-sized layout beyond the visible window. The inherited body text size has been adjusted to retain the previous text scale.
 
-## 2. Scrollbar still missing
+## Persistent EA sign-in entry point
 
-`layout.css` shows `.app { height: calc(100vh - var(--titlebar-height)); display: flex }`.
-`--titlebar-height` is `0px` (base.css), so `.app` is exactly `100vh` — the parent
-*is* bounded. The remaining break is that `.tab-content` (the direct child of
-`.content`, holding the Profile form) has `flex: 1` but no `min-height: 0`. In a
-flex column that makes it refuse to shrink below its content, so `.content` never
-sees overflow and never shows a scrollbar. Adding `min-height: 0` to both
-`.content` and `.tab-content`, plus `overflow: hidden` on `.app`, closes the
-chain.
+A dedicated **Sign in with EA** button now appears in the sidebar below the profile widget. It opens the existing authentication modal through `showAuthModal()` and reuses the existing `eaLogin` backend action. The button is hidden after a successful sign-in and remains available when signed out; in the collapsed sidebar, its icon remains visible.
 
-**Apply:** replace `layout.css` and `content.css`.
+## Localisation key handling
 
-If a scrollbar still does not appear after this, the next thing to check is
-whether `.content` is a direct child of `.app`. If there is an intermediate
-wrapper between them, that wrapper also needs `min-height: 0` and
-`overflow: hidden`.
+The translation resolver now normalises legacy uppercase keys (for example, `JOIN.SERVER_ADDRESS_LABEL`) and tries the matching locale-catalogue key before falling back. When a key is genuinely missing, it displays a readable label instead of exposing the raw translation identifier. Text, placeholders, titles, and tooltip attributes all use the same resolver.
 
-## 3. Persistent EA sign-in button
+## Build and validation
 
-The startup auth modal can be dismissed and there is no obvious way to reopen it.
-`auth.js.append.js` adds a fixed "Sign in with EA" button that is visible
-whenever `window._eaLoggedIn` is false and calls the existing `showAuthModal()`.
+The frontend is embedded into the launcher by `CypressLauncher/ResourceBuilder.cs`, so rebuild the launcher after changing these files.
 
-**Apply:** append the contents of `Launcher/wwwroot/js/auth.js.append.js` to the
-end of `Launcher/wwwroot/js/auth.js`. No other file changes are needed — the
-button reuses the existing `eaLogin` backend action.
+Static validation completed:
 
-## Status
+- JavaScript syntax checks passed for all frontend scripts.
+- CSS parsing checks passed for all frontend stylesheets.
+- Translation JSON files parse successfully.
+- The uppercase-key lookup, missing-key fallback, and interpolation behaviour passed targeted tests.
 
-- **Not compiled or run in this environment.** No .NET SDK, Wine or WebView2
-  here.
-- The CSS fixes are certain against the source I read (`base.css`, `layout.css`,
-  `content.css`). The restored `content.css` is the original file plus two added
-  properties, so the game-image regression is guaranteed to be undone.
-- The EA button reuses the existing modal and the existing `eaLogin` action, so
-  it does not introduce a new auth path. Whether `eaLogin` actually opens a
-  working sign-in window under GameNative still depends on the qrc/loopback
-  backend patch from the previous round.
+A full .NET build and in-app WebView2 smoke test could not be run in this environment because the .NET SDK was unavailable and the headless browser was blocked. The existing EA authentication backend was not changed.
