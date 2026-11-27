@@ -196,17 +196,16 @@ internal sealed class NativeFallbackHost : IDisposable
 				Text = "Cypress native host ready. Backend bridge connected.",
 				AutoSize = false,
 				Height = 28,
-				Dock = DockStyle.Top,
-				Padding = new Padding(12, 8, 12, 0),
+				Margin = new Padding(12, 8, 12, 0),
 				Font = new Font(FontFamily.GenericSansSerif, 10f, FontStyle.Bold)
 			};
 
 			var buttons = new FlowLayoutPanel
 			{
-				Dock = DockStyle.Top,
-				Height = 44,
-				Padding = new Padding(12, 6, 12, 6),
-				WrapContents = false
+				Height = 38,
+				Margin = new Padding(12, 6, 12, 6),
+				WrapContents = false,
+				AutoSize = false
 			};
 			buttons.Controls.Add(MakeButton("Check Auth", "{\"type\":\"checkAuth\"}"));
 			buttons.Controls.Add(MakeButton("EA Login", "{\"type\":\"eaLogin\"}"));
@@ -216,34 +215,75 @@ internal sealed class NativeFallbackHost : IDisposable
 
 			m_rawAction = new TextBox
 			{
-				Dock = DockStyle.Top,
+				Height = 26,
+				Margin = new Padding(12, 0, 12, 8),
 				PlaceholderText = "Raw action JSON, e.g. {\"type\":\"checkAuth\"}"
 			};
 
 			var sendRaw = new Button
 			{
 				Text = "Send JSON",
-				Dock = DockStyle.Top,
 				Height = 30,
-				Padding = new Padding(10, 4, 10, 4)
+				Margin = new Padding(12, 0, 12, 8),
+				Padding = new Padding(10, 4, 10, 4),
+				AutoSize = false
 			};
 			sendRaw.Click += (_, _) => SendRaw(m_rawAction.Text ?? string.Empty);
 
+			// The log has a fixed height so it scrolls its own content, and does
+			// NOT use Dock=Fill inside the AutoScroll panel - a Fill child would
+			// expand to the container and prevent the outer panel from scrolling.
 			m_log = new TextBox
 			{
-				Dock = DockStyle.Fill,
+				Height = 320,
+				Margin = new Padding(12, 0, 12, 12),
 				Multiline = true,
 				ReadOnly = true,
 				ScrollBars = ScrollBars.Vertical,
 				WordWrap = true
 			};
 
-			// Dock order matters: add Fill first so Top panels stack above it.
-			Controls.Add(m_log);
-			Controls.Add(sendRaw);
-			Controls.Add(m_rawAction);
-			Controls.Add(buttons);
-			Controls.Add(m_status);
+			// The TableLayoutPanel is Dock=Top (not Fill) so it can grow past the
+			// panel's client height and trigger the scrollbar. AutoSize=true with
+			// GrowAndShrink sizes it to its content. AutoScroll=false because the
+			// outer panel owns the scrollbar.
+			var table = new TableLayoutPanel
+			{
+				Dock = DockStyle.Top,
+				AutoSize = true,
+				AutoSizeMode = AutoSizeMode.GrowAndShrink,
+				AutoScroll = false,
+				ColumnCount = 1,
+				RowCount = 5,
+				BackColor = Color.White,
+				Margin = Padding.Empty,
+				Padding = Padding.Empty
+			};
+			table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+			table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+			table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+			table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+			table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+			table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+			table.Controls.Add(m_status, 0, 0);
+			table.Controls.Add(buttons, 0, 1);
+			table.Controls.Add(m_rawAction, 0, 2);
+			table.Controls.Add(sendRaw, 0, 3);
+			table.Controls.Add(m_log, 0, 4);
+
+			// Outer scroll container. This is the only control that produces the
+			// vertical scrollbar. No child uses Anchor=Right/Bottom, which would
+			// silently disable AutoScroll for the whole panel.
+			var scrollHost = new Panel
+			{
+				Dock = DockStyle.Fill,
+				AutoScroll = true,
+				BackColor = Color.White
+			};
+			scrollHost.Controls.Add(table);
+
+			Controls.Add(scrollHost);
 		}
 
 		private Button MakeButton(string text, string? json)
